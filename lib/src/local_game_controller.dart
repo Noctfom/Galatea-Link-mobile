@@ -2,6 +2,7 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
@@ -26,10 +27,13 @@ import 'models/model_package_service.dart';
 import 'models/onnx_runtime_service.dart';
 import 'services/secure_settings_store.dart';
 import 'services/diagnostic_log_store.dart';
+import 'services/mobile_platform_service.dart';
+import 'update/mobile_update_service.dart';
 
 class LocalGameController extends ChangeNotifier {
   // 创建共享同一 ONNX 会话的本地游戏与决策控制器
   LocalGameController({required SecureSettingsStore store}) : _store = store {
+    _updateService = MobileUpdateService(platformService: _platformService);
     _decisionEngine = MobileDecisionEngine(
       onnxRuntimeService: _onnxRuntimeService,
       cardDatabase: _cardDatabaseService,
@@ -38,6 +42,8 @@ class LocalGameController extends ChangeNotifier {
 
   final SecureSettingsStore _store;
   final DiagnosticLogStore _diagnosticLogStore = DiagnosticLogStore();
+  final MobilePlatformService _platformService = MobilePlatformService();
+  late final MobileUpdateService _updateService;
   final DeckLibraryService _deckLibraryService = DeckLibraryService();
   final ModelPackageService _modelPackageService = ModelPackageService();
   final OnnxRuntimeService _onnxRuntimeService = OnnxRuntimeService();
@@ -46,6 +52,13 @@ class LocalGameController extends ChangeNotifier {
   final MobileInterventionRuntime _interventionRuntime =
       MobileInterventionRuntime();
   GameConnectionSettings settings = GameConnectionSettings.defaults();
+  List<GameConnectionProfile> connectionProfiles =
+      const <GameConnectionProfile>[];
+  String? externalImportMessage;
+  MobileAppInfo? appInfo;
+  MobileUpdateCheck? updateCheck;
+  bool isCheckingUpdate = false;
+  String? updateError;
   YgoClientState state = YgoClientState.disconnected;
   List<YgoServerMessage> messages = const <YgoServerMessage>[];
   List<Object> errors = const <Object>[];
@@ -152,6 +165,7 @@ class LocalGameController extends ChangeNotifier {
   Future<void> initialize() async {
     await _diagnosticLogStore.initialize();
     settings = await _store.readGameConnectionSettings();
+    connectionProfiles = await _store.readGameConnectionProfiles();
     storedDecks = await _deckLibraryService.listDecks();
     selectedDeckFileName = await _store.readSelectedDeckFileName();
     final selectedDeckRecord = storedDecks
@@ -180,6 +194,8 @@ class LocalGameController extends ChangeNotifier {
     }
     darkTheme = await _store.readDarkTheme() ?? false;
     initialized = true;
+    await _platformService.initialize(onSharedFile: importSharedFile);
+    appInfo = await _platformService.readAppInfo();
     _recordLog(
       'app.initialized',
       data: <String, Object?>{
@@ -208,6 +224,47 @@ class LocalGameController extends ChangeNotifier {
     notifyListeners();
   }
 
+  // 手动检查受控 HTTPS 清单中的稳定版本
+  Future<MobileUpdateCheck?> checkForUpdates() async {
+    if (isCheckingUpdate) return updateCheck;
+    isCheckingUpdate = true;
+    updateError = null;
+    notifyListeners();
+    try {
+      final result = await _updateService.check();
+      updateCheck = result;
+      appInfo = result.current;
+      _recordLog(
+        'app.update.checked',
+        data: <String, Object?>{
+          'current_version_code': result.current.versionCode,
+          'latest_version_code': result.latest.versionCode,
+          'update_available': result.updateAvailable,
+          'update_required': result.updateRequired,
+        },
+      );
+      return result;
+    } catch (error) {
+      updateError = error.toString();
+      _recordLog(
+        'app.update.check_failed',
+        level: 'warning',
+        data: <String, Object?>{'error': error.toString()},
+      );
+      return null;
+    } finally {
+      isCheckingUpdate = false;
+      notifyListeners();
+    }
+  }
+
+  // 使用系统浏览器打开已经校验的稳定版发布页
+  Future<void> openUpdatePage() async {
+    final result = updateCheck;
+    if (result == null) throw StateError('请先检查更新');
+    await _updateService.openReleasePage(result);
+  }
+
   // 打开文件选择器并导入标准 YGOPro cards.cdb
   Future<CardDatabaseInfo?> pickAndInstallCardDatabase() async {
     final result = await FilePicker.platform.pickFiles(
@@ -220,11 +277,16 @@ class LocalGameController extends ChangeNotifier {
         !selected.name.toLowerCase().endsWith('.cdb')) {
       throw const FormatException('请选择可读取的 cards.cdb 文件');
     }
+    return installCardDatabaseFromPath(selected.path!);
+  }
+
+  // 从指定路径检查并安装标准 YGOPro cards.cdb
+  Future<CardDatabaseInfo> installCardDatabaseFromPath(String path) async {
     isCardDatabaseBusy = true;
     cardDatabaseError = null;
     notifyListeners();
     try {
-      final installed = await _cardDatabaseService.installFrom(selected.path!);
+      final installed = await _cardDatabaseService.installFrom(path);
       cardDatabaseInfo = installed;
       _recordLog(
         'cards.database.installed',
@@ -260,11 +322,19 @@ class LocalGameController extends ChangeNotifier {
         selected.path == null) {
       throw const FormatException('请选择可读取的 .gkg 部署包');
     }
+    return inspectModelPackageFromPath(selected.path!, fileName: selected.name);
+  }
+
+  // 从指定路径在后台预检 GKG V2 部署包
+  Future<GkgPackagePreview> inspectModelPackageFromPath(
+    String path, {
+    String? fileName,
+  }) async {
     isModelBusy = true;
     modelError = null;
     notifyListeners();
     try {
-      final preview = await _modelPackageService.inspect(selected.path!);
+      final preview = await _modelPackageService.inspect(path);
       modelPackagePreview = preview;
       _recordLog(
         'model.package.inspected',
@@ -283,7 +353,7 @@ class LocalGameController extends ChangeNotifier {
         'model.package.rejected',
         level: 'error',
         data: <String, Object?>{
-          'file_name': selected.name,
+          'file_name': fileName ?? path,
           'error': error.toString(),
         },
       );
@@ -446,6 +516,56 @@ class LocalGameController extends ChangeNotifier {
     await _connect(nextSettings);
   }
 
+  // 保存一份可从连接页快速恢复的服务器配置
+  Future<GameConnectionProfile> saveConnectionProfile(
+    String name,
+    GameConnectionSettings value,
+  ) async {
+    final normalizedName = name.trim();
+    if (normalizedName.isEmpty) throw const FormatException('配置名称不能为空');
+    final previous = connectionProfiles
+        .where(
+          (profile) =>
+              profile.name.trim().toLowerCase() == normalizedName.toLowerCase(),
+        )
+        .firstOrNull;
+    final id =
+        previous?.id ?? DateTime.now().microsecondsSinceEpoch.toRadixString(36);
+    final profile = GameConnectionProfile(
+      id: id,
+      name: normalizedName,
+      settings: value,
+    );
+    connectionProfiles = List<GameConnectionProfile>.unmodifiable(
+      <GameConnectionProfile>[
+        profile,
+        ...connectionProfiles.where((item) => item.id != id),
+      ],
+    );
+    await _store.writeGameConnectionProfiles(connectionProfiles);
+    _recordLog(
+      'connection.profile.saved',
+      data: <String, Object?>{
+        'name': normalizedName,
+        'host': value.host,
+        'updated': previous != null,
+        'has_password': value.password.isNotEmpty,
+      },
+    );
+    notifyListeners();
+    return profile;
+  }
+
+  // 删除一份用户保存的服务器快捷配置
+  Future<void> deleteConnectionProfile(String id) async {
+    connectionProfiles = List<GameConnectionProfile>.unmodifiable(
+      connectionProfiles.where((profile) => profile.id != id),
+    );
+    await _store.writeGameConnectionProfiles(connectionProfiles);
+    _recordLog('connection.profile.deleted');
+    notifyListeners();
+  }
+
   // 直接连接 MDPro3 游戏服务器并发送玩家登录信息
   Future<void> _connect(GameConnectionSettings nextSettings) async {
     if (isBusy || state == YgoClientState.connected) {
@@ -548,6 +668,7 @@ class LocalGameController extends ChangeNotifier {
     try {
       await client.connect();
       state = YgoClientState.connected;
+      await _platformService.startKeepAlive();
       roomPhase = 'joining';
       await _store.writeGameConnectionSettings(settings);
       await client.sendPlayerInfo(settings.playerName);
@@ -594,6 +715,7 @@ class LocalGameController extends ChangeNotifier {
     final client = _client;
     _client = null;
     await client?.dispose();
+    await _platformService.stopKeepAlive();
     state = YgoClientState.disconnected;
     roomPhase = finalRoomPhase;
     assignedPlayer = null;
@@ -695,6 +817,60 @@ class LocalGameController extends ChangeNotifier {
     return record;
   }
 
+  // 处理 Android 文件关联传入的 YDK GKG 或 CDB 文件
+  Future<void> importSharedFile(MobileSharedFile file) async {
+    final lowerName = file.name.toLowerCase();
+    try {
+      if (lowerName.endsWith('.ydk')) {
+        if (state == YgoClientState.connected) {
+          throw const YgoProtocolException('对局连接期间不能导入卡组');
+        }
+        final source = File(file.path);
+        if (!await source.exists() || await source.length() > 512 * 1024) {
+          throw const FormatException('YDK 文件不存在或超过 512 KiB');
+        }
+        final value = YdkDeckParser.parse(
+          await source.readAsString(),
+          name: file.name,
+        );
+        final imported = await importDeck(value);
+        externalImportMessage = '已导入并选择 ${imported.fileName}';
+      } else if (lowerName.endsWith('.cdb')) {
+        final info = await installCardDatabaseFromPath(file.path);
+        externalImportMessage = '已导入卡片资料 ${info.dataCount} 张';
+      } else if (lowerName.endsWith('.gkg')) {
+        final preview = await inspectModelPackageFromPath(
+          file.path,
+          fileName: file.name,
+        );
+        externalImportMessage = '已预检 ${preview.packageName}，请在设置中选择并安装模型';
+      } else {
+        throw const FormatException('只支持 YDK GKG 和 CDB 文件');
+      }
+      _recordLog(
+        'platform.file.imported',
+        data: <String, Object?>{'file_name': file.name},
+      );
+    } catch (error) {
+      externalImportMessage = '文件导入失败：$error';
+      _recordLog(
+        'platform.file.import_failed',
+        level: 'error',
+        data: <String, Object?>{
+          'file_name': file.name,
+          'error': error.toString(),
+        },
+      );
+    }
+    notifyListeners();
+  }
+
+  // 清除连接页已经展示过的外部导入结果
+  void clearExternalImportMessage() {
+    externalImportMessage = null;
+    notifyListeners();
+  }
+
   // 选择本地卡组库中的一份卡组用于下次连接
   Future<void> selectStoredDeck(StoredYdkDeck record) async {
     if (state == YgoClientState.connected) {
@@ -774,6 +950,9 @@ class LocalGameController extends ChangeNotifier {
     _decisionEngine.close();
     unawaited(_onnxRuntimeService.close());
     unawaited(_cardDatabaseService.close());
+    _platformService.dispose();
+    unawaited(_platformService.stopKeepAlive());
+    _updateService.dispose();
     super.dispose();
   }
 
@@ -1155,9 +1334,8 @@ class LocalGameController extends ChangeNotifier {
   // 在全部决斗座位准备后由房主自动请求开始对局
   Future<void> _startDuelIfHostReady() async {
     if (!isRoomHost || roomPhase == 'duel_started' || _startRequested) return;
-    final requiredPlayers = roomDuelMode == 2
-        ? const <int>[0, 1, 2, 3]
-        : const <int>[0, 1];
+    final requiredPlayers =
+        roomDuelMode == 2 ? const <int>[0, 1, 2, 3] : const <int>[0, 1];
     if (!requiredPlayers.every((player) => roomReady[player] ?? false)) return;
     _startRequested = true;
     try {

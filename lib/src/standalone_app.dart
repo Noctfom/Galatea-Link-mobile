@@ -3,9 +3,11 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'deck/deck_file_loader.dart';
 import 'deck/deck_library_service.dart';
+import 'deck/deck_text_parser.dart';
 import 'deck/ydk_deck.dart';
 import 'app_decision_settings.dart';
 import 'game_chat.dart';
@@ -96,6 +98,7 @@ class GameConnectionScreen extends StatefulWidget {
 }
 
 class _GameConnectionScreenState extends State<GameConnectionScreen> {
+  static int? _lastClipboardSignature;
   late final TextEditingController _hostController;
   late final TextEditingController _portController;
   late final TextEditingController _passwordController;
@@ -120,6 +123,7 @@ class _GameConnectionScreenState extends State<GameConnectionScreen> {
       _deckLabel =
           '${deck.name} · 主卡组 ${deck.main.length} · 额外 ${deck.extra.length}';
     }
+    WidgetsBinding.instance.addPostFrameCallback((_) => _offerClipboardDeck());
   }
 
   // 释放游戏连接表单控制器
@@ -144,12 +148,189 @@ class _GameConnectionScreenState extends State<GameConnectionScreen> {
     return result;
   }
 
+  // 从当前表单创建一份可保存或连接的配置
+  GameConnectionSettings? _readFormSettings() {
+    final port = _parseInt(_portController.text, '端口');
+    final gameId = _parseInt(_gameIdController.text, '房间编号');
+    if (port == null || gameId == null) return null;
+    return GameConnectionSettings(
+      host: _hostController.text.trim(),
+      port: port,
+      password: _passwordController.text,
+      playerName: _nameController.text.trim(),
+      gameId: gameId,
+      protocolVersion: widget.controller.settings.protocolVersion,
+      preferSecond: _preferSecond,
+    );
+  }
+
+  // 将快捷配置填写到当前连接表单
+  void _applyProfile(GameConnectionSettings value) {
+    setState(() {
+      _hostController.text = value.host;
+      _portController.text = value.port.toString();
+      _passwordController.text = value.password;
+      _nameController.text = value.playerName;
+      _gameIdController.text = value.gameId.toString();
+      _preferSecond = value.preferSecond;
+    });
+  }
+
+  // 应用同一台手机上 YGOMobile 本地房间快捷配置
+  void _applyLocalYgoMobilePreset() {
+    _hostController.text = '127.0.0.1';
+    _portController.text = '7911';
+    _gameIdController.text = '0';
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('已套用手机本机 YGOMobile 配置 127.0.0.1:7911'),
+      ),
+    );
+  }
+
+  // 将当前连接表单保存为命名快捷配置
+  Future<void> _saveProfile() async {
+    final value = _readFormSettings();
+    if (value == null) return;
+    final nameController = TextEditingController(
+      text: value.host.isEmpty ? '新连接' : value.host,
+    );
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('保存连接配置'),
+        content: TextField(
+          controller: nameController,
+          autofocus: true,
+          maxLength: 40,
+          decoration: const InputDecoration(
+            labelText: '配置名称',
+            helperText: '同名配置会覆盖，空密码会清除旧密码',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(nameController.text),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (name == null || name.trim().isEmpty || !mounted) return;
+    await widget.controller.saveConnectionProfile(name, value);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已保存连接配置 ${name.trim()}')),
+    );
+  }
+
+  // 打开已保存连接配置列表并支持套用或删除
+  Future<void> _openProfiles() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => AnimatedBuilder(
+        animation: widget.controller,
+        builder: (context, child) {
+          final profiles = widget.controller.connectionProfiles;
+          return SafeArea(
+            child: profiles.isEmpty
+                ? const Padding(
+                    padding: EdgeInsets.all(28),
+                    child: Center(child: Text('尚未保存连接配置')),
+                  )
+                : ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: profiles.length,
+                    itemBuilder: (context, index) {
+                      final profile = profiles[index];
+                      return ListTile(
+                        leading: const Icon(Icons.bookmark_outline),
+                        title: Text(profile.name),
+                        subtitle: Text(
+                          '${profile.settings.host}:${profile.settings.port} · 房间 ${profile.settings.gameId}',
+                        ),
+                        onTap: () {
+                          _applyProfile(profile.settings);
+                          Navigator.of(sheetContext).pop();
+                        },
+                        trailing: IconButton(
+                          tooltip: '删除配置',
+                          onPressed: () => widget.controller
+                              .deleteConnectionProfile(profile.id),
+                          icon: const Icon(Icons.delete_outline),
+                        ),
+                      );
+                    },
+                  ),
+          );
+        },
+      ),
+    );
+  }
+
+  // 检查首次进入页面时的剪贴板并提示导入卡组文本
+  Future<void> _offerClipboardDeck() async {
+    if (!mounted) return;
+    ClipboardData? data;
+    try {
+      data = await Clipboard.getData(Clipboard.kTextPlain);
+    } on PlatformException {
+      return;
+    }
+    final text = data?.text?.trim();
+    if (text == null || !DeckTextParser.looksLikeDeckText(text)) return;
+    final signature = Object.hash(text.length, text.hashCode);
+    if (_lastClipboardSignature == signature) return;
+    _lastClipboardSignature = signature;
+    if (!mounted) return;
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('发现卡组文本'),
+        content: const Text('剪贴板中包含 YDK 文本或卡组码，是否导入并设为当前卡组'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('忽略'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('导入'),
+          ),
+        ],
+      ),
+    );
+    if (accepted != true || !mounted) return;
+    try {
+      final record = await widget.controller.importDeck(
+        DeckTextParser.parse(text, name: '剪贴板卡组'),
+      );
+      if (!mounted) return;
+      setState(() {
+        _deckLabel =
+            '${record.deck.name} · 主卡组 ${record.deck.main.length} · 额外 ${record.deck.extra.length} · 副卡组 ${record.deck.side.length}';
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已导入并选择 ${record.fileName}')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('剪贴板卡组导入失败：$error')),
+      );
+    }
+  }
+
   // 提交 MDPro3 直接连接请求
   Future<void> _connect() async {
     FocusScope.of(context).unfocus();
-    final port = _parseInt(_portController.text, '端口');
-    final gameId = _parseInt(_gameIdController.text, '房间编号');
-    if (port == null || gameId == null) return;
+    final nextSettings = _readFormSettings();
+    if (nextSettings == null) return;
     if (widget.controller.deck == null) {
       ScaffoldMessenger.of(
         context,
@@ -158,15 +339,7 @@ class _GameConnectionScreenState extends State<GameConnectionScreen> {
     }
     try {
       await widget.controller.connect(
-        GameConnectionSettings(
-          host: _hostController.text,
-          port: port,
-          password: _passwordController.text,
-          playerName: _nameController.text,
-          gameId: gameId,
-          protocolVersion: widget.controller.settings.protocolVersion,
-          preferSecond: _preferSecond,
-        ),
+        nextSettings,
       );
     } catch (_) {
       if (!mounted) return;
@@ -252,7 +425,48 @@ class _GameConnectionScreenState extends State<GameConnectionScreen> {
                       ),
                       const SizedBox(height: 6),
                       const Text('直接连接 MDPro3/YGOPro，电脑端 Link 和 AstrBot 不需要运行'),
+                      if (controller.externalImportMessage != null) ...[
+                        const SizedBox(height: 12),
+                        Card(
+                          color:
+                              Theme.of(context).colorScheme.secondaryContainer,
+                          child: ListTile(
+                            dense: true,
+                            leading:
+                                const Icon(Icons.file_download_done_outlined),
+                            title: Text(controller.externalImportMessage!),
+                            trailing: IconButton(
+                              tooltip: '关闭提示',
+                              onPressed: controller.clearExternalImportMessage,
+                              icon: const Icon(Icons.close),
+                            ),
+                          ),
+                        ),
+                      ],
                       const SizedBox(height: 20),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          OutlinedButton.icon(
+                            onPressed: _applyLocalYgoMobilePreset,
+                            icon: const Icon(Icons.phone_android_outlined),
+                            label: const Text('手机本机 YGOMobile'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: _saveProfile,
+                            icon: const Icon(Icons.bookmark_add_outlined),
+                            label: const Text('保存配置'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: _openProfiles,
+                            icon: const Icon(Icons.bookmarks_outlined),
+                            label: Text(
+                                '快捷配置 ${controller.connectionProfiles.length}'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
                       TextField(
                         controller: _hostController,
                         decoration: const InputDecoration(
@@ -356,7 +570,7 @@ class _GameConnectionScreenState extends State<GameConnectionScreen> {
                       ],
                       const SizedBox(height: 14),
                       const Text(
-                        '密码只写入本机安全存储。Android 模拟器连接电脑本机服务时，地址使用 10.0.2.2',
+                        '密码只写入本机安全存储。模拟器访问电脑使用 10.0.2.2，实体机使用电脑局域网 IP。连接期间会显示保活通知',
                         style: TextStyle(fontSize: 12),
                       ),
                     ],
@@ -958,6 +1172,72 @@ class _LocalDeckLibraryPageState extends State<LocalDeckLibraryPage> {
     }
   }
 
+  // 打开文本输入框并导入 YDK YDKe 或 Ourocg 卡组
+  Future<void> _importDeckText({String initialText = ''}) async {
+    final nameController = TextEditingController(text: '文本导入卡组');
+    final textController = TextEditingController(text: initialText);
+    final result = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('从文本导入卡组'),
+        content: SizedBox(
+          width: 520,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameController,
+                maxLength: 100,
+                decoration: const InputDecoration(labelText: '卡组名称'),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: textController,
+                minLines: 7,
+                maxLines: 14,
+                decoration: const InputDecoration(
+                  labelText: '卡组文本或卡组码',
+                  hintText: '#main\n...\n#extra\n...\n!side\n... 或 ydke://',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(<String, String>{
+              'name': nameController.text,
+              'text': textController.text,
+            }),
+            child: const Text('解析并导入'),
+          ),
+        ],
+      ),
+    );
+    if (result == null || !mounted) return;
+    try {
+      final deck = DeckTextParser.parse(
+        result['text'] ?? '',
+        name: result['name'] ?? '文本导入卡组',
+      );
+      final record = await widget.controller.importDeck(deck);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已导入并选择 ${record.fileName}')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('卡组文本导入失败：$error')),
+      );
+    }
+  }
+
   // 选择指定本地卡组供下一次连接使用
   Future<void> _selectDeck(StoredYdkDeck record) async {
     try {
@@ -1036,10 +1316,30 @@ class _LocalDeckLibraryPageState extends State<LocalDeckLibraryPage> {
           appBar: AppBar(
             title: const Text('本地卡组库'),
             actions: [
-              IconButton(
-                tooltip: '导入 YDK',
-                onPressed: _editable ? _importDeck : null,
-                icon: const Icon(Icons.file_open_outlined),
+              PopupMenuButton<String>(
+                tooltip: '导入卡组',
+                enabled: _editable,
+                icon: const Icon(Icons.add),
+                onSelected: (value) {
+                  if (value == 'file') _importDeck();
+                  if (value == 'text') _importDeckText();
+                },
+                itemBuilder: (context) => const [
+                  PopupMenuItem(
+                    value: 'file',
+                    child: ListTile(
+                      leading: Icon(Icons.file_open_outlined),
+                      title: Text('选择 YDK 文件'),
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'text',
+                    child: ListTile(
+                      leading: Icon(Icons.content_paste_go_outlined),
+                      title: Text('粘贴卡组文本或卡组码'),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
@@ -1047,7 +1347,7 @@ class _LocalDeckLibraryPageState extends State<LocalDeckLibraryPage> {
               ? const Center(
                   child: Padding(
                     padding: EdgeInsets.all(28),
-                    child: Text('尚未导入卡组\n点击右上角从设备选择 YDK 文件'),
+                    child: Text('尚未导入卡组\n点击右上角导入 YDK 文件或卡组文本'),
                   ),
                 )
               : ListView.separated(
@@ -1107,9 +1407,9 @@ class _LocalDeckLibraryPageState extends State<LocalDeckLibraryPage> {
                 ),
           floatingActionButton: _editable
               ? FloatingActionButton.extended(
-                  onPressed: _importDeck,
-                  icon: const Icon(Icons.add),
-                  label: const Text('导入 YDK'),
+                  onPressed: _importDeckText,
+                  icon: const Icon(Icons.content_paste_go_outlined),
+                  label: const Text('文本导入'),
                 )
               : null,
         );
@@ -1664,6 +1964,163 @@ class _LocalSettingsPageState extends State<LocalSettingsPage> {
     ).showSnackBar(const SnackBar(content: Text('本地模型已卸载')));
   }
 
+  // 检查稳定版更新清单并展示检测结果
+  Future<void> _checkUpdate() async {
+    final result = await widget.controller.checkForUpdates();
+    if (!mounted) return;
+    if (result == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(widget.controller.updateError ?? '检查更新失败'),
+        ),
+      );
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          result.updateAvailable
+              ? '发现新版本 ${result.latest.versionName}'
+              : '当前已经是最新稳定版',
+        ),
+      ),
+    );
+  }
+
+  // 使用系统浏览器打开经过更新清单校验的发布页
+  Future<void> _openUpdatePage() async {
+    try {
+      await widget.controller.openUpdatePage();
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('无法打开更新页面：$error')));
+    }
+  }
+
+  // 展示应用的数据处理边界摘要
+  Future<void> _showPrivacySummary() async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('数据与隐私'),
+        content: const SingleChildScrollView(
+          child: Text(
+            '卡组、模型、卡片数据库、连接配置和诊断日志保存在应用私有目录中。房间密码与 API Key 使用系统安全存储。应用只在你连接游戏服务器、调用所配置的 LLM 服务或手动检查更新时访问网络。LLM 仅接收对局协议中当前玩家可见且策略所需的数据，不上传对手隐藏信息。应用不包含广告、统计 SDK 或后台遥测。',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 展示 Flutter 收集的开源组件许可信息
+  void _showOpenSourceLicenses() {
+    final current = widget.controller.appInfo;
+    showLicensePage(
+      context: context,
+      applicationName: 'Galatea Link mobile',
+      applicationVersion: current == null
+          ? null
+          : '${current.versionName}+${current.versionCode}',
+      applicationLegalese: 'GNU General Public License v3.0',
+    );
+  }
+
+  // 构建版本信息和稳定版更新检测区域
+  Widget _buildUpdateCard(BuildContext context) {
+    final controller = widget.controller;
+    final current = controller.appInfo;
+    final checked = controller.updateCheck;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('应用版本', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 8),
+            Text(
+              current == null
+                  ? '当前版本信息暂不可用'
+                  : '${current.versionName}+${current.versionCode} · ${current.applicationId}',
+            ),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: controller.isCheckingUpdate ? null : _checkUpdate,
+              icon: controller.isCheckingUpdate
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.system_update_alt_outlined),
+              label: Text(controller.isCheckingUpdate ? '正在检查' : '检查稳定版更新'),
+            ),
+            if (checked != null) ...[
+              const SizedBox(height: 10),
+              Text(
+                checked.updateAvailable
+                    ? '最新 ${checked.latest.versionName}+${checked.latest.versionCode}'
+                    : '已是最新稳定版 ${checked.latest.versionName}',
+              ),
+              if (checked.latest.releaseNotes.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(
+                  checked.latest.releaseNotes,
+                  maxLines: 8,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+              if (checked.updateAvailable) ...[
+                const SizedBox(height: 8),
+                FilledButton.icon(
+                  onPressed: _openUpdatePage,
+                  icon: const Icon(Icons.open_in_browser_outlined),
+                  label: Text(checked.updateRequired ? '必须更新并打开下载页' : '打开下载页'),
+                ),
+              ],
+            ],
+            if (controller.updateError != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                controller.updateError!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ],
+            const SizedBox(height: 6),
+            const Text(
+              '仅手动请求 galatea.noctfom.top 的 HTTPS 版本清单，下载和安装交由系统浏览器处理',
+              style: TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                TextButton.icon(
+                  onPressed: _showPrivacySummary,
+                  icon: const Icon(Icons.privacy_tip_outlined),
+                  label: const Text('数据与隐私'),
+                ),
+                TextButton.icon(
+                  onPressed: _showOpenSourceLicenses,
+                  icon: const Icon(Icons.balance_outlined),
+                  label: const Text('开源许可'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // 构建 GKG 预检安装和本地模型选择区域
   Widget _buildModelCard(BuildContext context) {
     final controller = widget.controller;
@@ -1839,6 +2296,7 @@ class _LocalSettingsPageState extends State<LocalSettingsPage> {
     final content = ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        _buildUpdateCard(context),
         _buildModelCard(context),
         _buildCardDatabaseCard(context),
         Card(

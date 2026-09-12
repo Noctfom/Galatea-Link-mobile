@@ -1,5 +1,7 @@
 // Galatea Link 移动端安全设置存储，只保存地址和令牌等客户端配置
 
+import 'dart:convert';
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -8,7 +10,7 @@ import '../app_decision_settings.dart';
 
 class SecureSettingsStore {
   SecureSettingsStore({FlutterSecureStorage? secureStorage})
-    : _secureStorage = secureStorage ?? const FlutterSecureStorage();
+      : _secureStorage = secureStorage ?? const FlutterSecureStorage();
 
   static const _baseUrlKey = 'galatea_link_base_url';
   static const _tokenKey = 'galatea_link_api_token';
@@ -42,6 +44,9 @@ class SecureSettingsStore {
   static const _llmApiKeyKey = 'galatea_llm_api_key';
   static const _selectedModelPathKey = 'galatea_selected_model_path';
   static const _selectedDeckFileKey = 'galatea_selected_deck_file';
+  static const _connectionProfilesKey = 'galatea_connection_profiles';
+  static const _connectionProfilePasswordPrefix =
+      'galatea_connection_profile_password_';
   final FlutterSecureStorage _secureStorage;
 
   // 读取上一次使用的 Link 地址
@@ -108,7 +113,90 @@ class SecureSettingsStore {
     await preferences.setInt(_gameIdKey, settings.gameId);
     await preferences.setInt(_protocolVersionKey, settings.protocolVersion);
     await preferences.setBool(_preferSecondKey, settings.preferSecond);
-    await _secureStorage.write(key: _gamePasswordKey, value: settings.password);
+    if (settings.password.isEmpty) {
+      await _secureStorage.delete(key: _gamePasswordKey);
+    } else {
+      await _secureStorage.write(
+        key: _gamePasswordKey,
+        value: settings.password,
+      );
+    }
+  }
+
+  // 读取用户保存的游戏连接快捷配置
+  Future<List<GameConnectionProfile>> readGameConnectionProfiles() async {
+    final preferences = await SharedPreferences.getInstance();
+    final encoded = preferences.getString(_connectionProfilesKey);
+    if (encoded == null || encoded.isEmpty) {
+      return const <GameConnectionProfile>[];
+    }
+    try {
+      final decoded = jsonDecode(encoded);
+      if (decoded is! List) return const <GameConnectionProfile>[];
+      final profiles = <GameConnectionProfile>[];
+      for (final raw in decoded) {
+        if (raw is! Map) continue;
+        final json = Map<String, dynamic>.from(raw);
+        final id = json['id'];
+        final name = json['name'];
+        final rawSettings = json['settings'];
+        if (id is! String ||
+            id.isEmpty ||
+            name is! String ||
+            name.isEmpty ||
+            rawSettings is! Map) {
+          continue;
+        }
+        final password = await _secureStorage.read(
+              key: '$_connectionProfilePasswordPrefix$id',
+            ) ??
+            '';
+        profiles.add(
+          GameConnectionProfile(
+            id: id,
+            name: name,
+            settings: GameConnectionSettings.fromProfileJson(
+              Map<String, dynamic>.from(rawSettings),
+              password: password,
+            ),
+          ),
+        );
+      }
+      return List<GameConnectionProfile>.unmodifiable(profiles);
+    } catch (_) {
+      return const <GameConnectionProfile>[];
+    }
+  }
+
+  // 保存用户连接快捷配置并将各配置密码写入安全存储
+  Future<void> writeGameConnectionProfiles(
+    List<GameConnectionProfile> profiles,
+  ) async {
+    final preferences = await SharedPreferences.getInstance();
+    final existing = await readGameConnectionProfiles();
+    final retainedIds = profiles.map((profile) => profile.id).toSet();
+    for (final removed in existing.where(
+      (profile) => !retainedIds.contains(profile.id),
+    )) {
+      await _secureStorage.delete(
+        key: '$_connectionProfilePasswordPrefix${removed.id}',
+      );
+    }
+    for (final profile in profiles) {
+      final passwordKey = '$_connectionProfilePasswordPrefix${profile.id}';
+      if (profile.settings.password.isEmpty) {
+        await _secureStorage.delete(key: passwordKey);
+      } else {
+        await _secureStorage.write(
+          key: passwordKey,
+          value: profile.settings.password,
+        );
+      }
+    }
+    await preferences.setString(
+      _connectionProfilesKey,
+      jsonEncode(profiles.map((profile) => profile.toJson()).toList()),
+    );
   }
 
   // 读取独立于连接状态的 Agent 设置
@@ -133,7 +221,7 @@ class SecureSettingsStore {
       llmTimeBudget: preferences.getDouble(_llmTimeBudgetKey) ?? 12,
       autonomyAllowedModes:
           preferences.getStringList(_autonomyAllowedModesKey) ??
-          const <String>['core_only', 'hybrid', 'llm_review', 'llm_only'],
+              const <String>['core_only', 'hybrid', 'llm_review', 'llm_only'],
       autonomyCoreConfidenceMin:
           preferences.getDouble(_autonomyConfidenceMinKey) ?? 0.2,
       autonomyCoreConfidenceMax:

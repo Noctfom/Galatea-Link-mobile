@@ -35,6 +35,10 @@
 *.jsonl
 *.log
 
+# 本地构建产物
+*.apk
+*.aab
+
 # 编辑器与操作系统文件
 .idea/
 .vscode/*

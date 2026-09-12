@@ -1,8 +1,22 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 游戏连接和 LLM 请求需要网络访问 -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <!-- 活动对局进入后台后通过可见通知维持响应 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <application
         android:label="Galatea Link mobile"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:appCategory="game"
+        android:enableOnBackInvokedCallback="true"
+        android:icon="@mipmap/ic_launcher"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -24,7 +38,35 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- 注册常见 YGOPro 文件类型的打开入口 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="application/x-ygopro-deck"/>
+                <data android:mimeType="application/x-galatea-gkg"/>
+                <data android:mimeType="application/vnd.sqlite3"/>
+                <data android:mimeType="application/x-sqlite3"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:scheme="content" android:mimeType="text/plain" android:pathPattern=".*\.ydk"/>
+                <data android:scheme="content" android:mimeType="application/octet-stream" android:pathPattern=".*\.ydk"/>
+                <data android:scheme="content" android:mimeType="application/octet-stream" android:pathPattern=".*\.gkg"/>
+                <data android:scheme="content" android:mimeType="application/octet-stream" android:pathPattern=".*\.cdb"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:scheme="file" android:pathPattern=".*\.ydk"/>
+                <data android:scheme="file" android:pathPattern=".*\.gkg"/>
+                <data android:scheme="file" android:pathPattern=".*\.cdb"/>
+            </intent-filter>
         </activity>
+        <service
+            android:name=".DuelKeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"/>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

@@ -1,7 +1,7 @@
 name: galatea_link_mobile
 description: Galatea Link 独立移动端游戏王 Agent
 publish_to: none
-version: 0.1.0+1
+version: 0.2.0+4
 
 environment:
   sdk: ">=3.3.0 <4.0.0"

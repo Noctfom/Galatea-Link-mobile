@@ -17,7 +17,7 @@ if (hasReleaseSigning) {
 }
 
 android {
-    namespace = "com.example.galatea_link_mobile"
+    namespace = "com.noctfom.galatealink"
     // 使用已安装的 Android API 36 编译，运行时仍可连接 API 35 模拟器
     compileSdk = 36
     ndkVersion = flutter.ndkVersion
@@ -32,8 +32,8 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.example.galatea_link_mobile"
+        // 固定公开发布后的唯一应用标识
+        applicationId = "com.noctfom.galatealink"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
