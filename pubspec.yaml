@@ -1,0 +1,47 @@
+name: galatea_link_mobile
+description: Galatea Link 独立移动端游戏王 Agent
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_secure_storage: ^9.2.2
+  file_picker: ^8.1.2
+  http: ^1.2.2
+  shared_preferences: ^2.3.2
+  web_socket_channel: ^3.0.1
+  archive: 4.2.0
+  path_provider: 2.1.5
+  flutter_onnxruntime: 1.8.5
+  sqlite3: ^2.9.4
+  sqlite3_flutter_libs: ^0.5.42
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  flutter_launcher_icons: ^0.14.4
+
+dependency_overrides:
+  flutter_onnxruntime:
+    path: third_party/flutter_onnxruntime
+
+flutter:
+  uses-material-design: true
+
+flutter_launcher_icons:
+  android: "ic_launcher"
+  ios: false
+  image_path: "docs/logo.png"
+  adaptive_icon_background: "#EEF5F2"
+  adaptive_icon_foreground: "docs/logo.png"
+  adaptive_icon_foreground_inset: 12
+  web:
+    generate: true
+    image_path: "docs/logo.png"
+    background_color: "#EEF5F2"
+    theme_color: "#087F6D"
