@@ -2,7 +2,7 @@
 
 Galatea Link 的独立 Flutter 移动客户端，直接连接 MDPro3/YGOPro 游戏服务器并在设备本地运行 Agent 流程，不依赖 PC Link API、AstrBot、Python 或 Torch
 
-当前版本为 `0.2.0+4`，Android 应用标识为 `com.noctfom.galatealink`。Android 模拟器上的本地房间、233 在线房间、完整卡组上传和 LLM 连续操作已经打通，实体设备兼容性验证正在进行
+当前版本为 `0.2.1+5`，Android 应用标识为 `com.noctfom.galatealink`。Android 模拟器上的本地房间、233 在线房间、完整卡组上传和 LLM 连续操作已经打通，实体设备兼容性验证正在进行
 
 ## 当前能力
 

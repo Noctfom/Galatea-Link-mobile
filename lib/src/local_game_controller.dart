@@ -1118,6 +1118,8 @@ class LocalGameController extends ChangeNotifier {
           'duel.ocg.batch',
           data: <String, Object?>{
             'types': gameState.lastBatchTypes,
+            'normalized_core_ghost_messages':
+                gameState.lastBatchNormalizedCoreGhostCount,
             'pending_action_type': gameState.pendingAction?.type,
             'pending_action_player': gameState.pendingAction?.player,
             'assigned_player': assignedPlayer,

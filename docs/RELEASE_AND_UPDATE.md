@@ -12,18 +12,44 @@ com.noctfom.galatealink
 
 从旧测试包 `com.example.galatea_link_mobile` 迁移时，Android 会把新包识别为另一应用。首次公开发布前应卸载旧测试包，并重新导入需要保留的本地资产和设置
 
+## 首次创建正式签名
+
+密钥只需要创建一次，但以后每一个 GitHub、下载页或商店版本都必须使用同一正式密钥签名。创建密码、保存密钥与离线备份必须由项目所有者本人完成，协作者只需要验证最终 APK 的公开证书指纹
+
+在 PowerShell 中运行：
+
+```powershell
+Set-Location E:\flutter_app\galatea_link_mobile
+.\scripts\create_release_keystore.ps1 `
+  -KeystorePath '你选定的仓库外安全目录\galatea-link-mobile-release.jks' `
+  -KeytoolPath 'E:\Android Studio\jbr\bin\keytool.exe'
+```
+
+脚本不会把密码放进命令行或日志，随后由 `keytool` 直接交互询问。证书有效期已设置为约二十七年，正式发布前应确认满足预期的应用生命周期
+
+创建后将 `android/key.properties.example` 复制为 `android/key.properties`，只在本机填写密码、别名和 JKS 绝对路径。该文件与 JKS 已被 `.gitignore` 排除
+
+备份至少应包含：
+
+- 原始 JKS 文件
+- JKS 密码、Key 密码和 Alias
+- JKS 文件 SHA-256 与签名证书 SHA-256
+- 一份断网介质备份和一份不同地点的加密备份
+
+完成备份后应实际复制回一台测试环境，运行一次签名构建确认备份可用。不要只验证压缩包可以打开，也不要把密码和未加密 JKS 放在同一云盘目录
+
 ## 版本规则
 
 `pubspec.yaml` 使用 `主版本.次版本.修订号+内部版本号`：
 
 ```text
-version: 0.2.0+4
+version: 0.2.1+5
 ```
 
 - `versionName` 用于用户阅读和 Git 标签
 - `versionCode` 必须在每次发布时严格递增，更新判断以它为准
-- 稳定版 Git 标签建议使用 `v0.2.0`
-- APK 文件名建议使用 `Galatea-Link-mobile-v0.2.0-universal.apk`
+- 稳定版 Git 标签建议使用 `v0.2.1`
+- APK 文件名建议使用 `Galatea-Link-mobile-v0.2.1-universal.apk`
 
 ## 稳定版更新清单
 
@@ -39,11 +65,11 @@ https://galatea.noctfom.top/mobile/update.json
 {
   "schema_version": 1,
   "channel": "stable",
-  "version_name": "0.2.0",
-  "version_code": 4,
+  "version_name": "0.2.1",
+  "version_code": 5,
   "minimum_supported_version_code": 1,
-  "download_url": "https://github.com/Noctfom/Galatea-Link-mobile/releases/download/v0.2.0/Galatea-Link-mobile-v0.2.0-universal.apk",
-  "release_page_url": "https://github.com/Noctfom/Galatea-Link-mobile/releases/tag/v0.2.0",
+  "download_url": "https://github.com/Noctfom/Galatea-Link-mobile/releases/download/v0.2.1/Galatea-Link-mobile-v0.2.1-universal.apk",
+  "release_page_url": "https://github.com/Noctfom/Galatea-Link-mobile/releases/tag/v0.2.1",
   "sha256": "填写 APK 的六十四位 SHA-256 小写或大写十六进制值",
   "release_notes": "本次稳定版的简短说明",
   "published_at": "2026-09-13T00:00:00Z"
@@ -63,6 +89,21 @@ https://galatea.noctfom.top/mobile/update.json
 5. 创建对应 GitHub Release，上传重新命名后的 APK、SHA-256 文件和源码归档
 6. APK 上传完成后再原子更新子域名上的 `mobile/update.json`
 7. 在至少一台干净设备和一台覆盖升级设备上验证下载、签名、安装、资产保留和对局流程
+
+GitHub Release 上传 APK 后，可以使用仓库工具生成清单：
+
+```powershell
+.\scripts\generate_update_manifest.ps1 `
+  -ApkPath '.\build\app\outputs\flutter-apk\app-release.apk' `
+  -VersionName '0.2.1' `
+  -VersionCode 5 `
+  -DownloadUrl 'https://github.com/Noctfom/Galatea-Link-mobile/releases/download/v0.2.1/Galatea-Link-mobile-v0.2.1-universal.apk' `
+  -ReleasePageUrl 'https://github.com/Noctfom/Galatea-Link-mobile/releases/tag/v0.2.1' `
+  -ReleaseNotes '本次稳定版说明' `
+  -OutputPath '.\build\release\update.json'
+```
+
+生成的 `update.json` 不包含密钥，可以交给静态网站、对象存储或普通 HTTPS 服务器发布
 
 Windows 可以使用：
 

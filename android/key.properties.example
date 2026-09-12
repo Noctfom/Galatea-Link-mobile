@@ -1,0 +1,5 @@
+# Galatea Link mobile 本机签名配置模板，复制为 key.properties 后填写且不得提交真实值
+storePassword=REPLACE_WITH_STORE_PASSWORD
+keyPassword=REPLACE_WITH_KEY_PASSWORD
+keyAlias=galatea-link-mobile
+storeFile=C:/Secure/Galatea/galatea-link-mobile-release.jks

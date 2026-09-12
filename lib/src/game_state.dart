@@ -236,6 +236,7 @@ class MobileGameState {
   PendingAction? pendingAction;
   bool retryRequested = false;
   List<int> lastBatchTypes = const <int>[];
+  int lastBatchNormalizedCoreGhostCount = 0;
   String? lastError;
 
   // 重置单局状态并清除旧对局残留的动作和可见信息
@@ -267,6 +268,7 @@ class MobileGameState {
     pendingAction = null;
     retryRequested = false;
     lastBatchTypes = const <int>[];
+    lastBatchNormalizedCoreGhostCount = 0;
     lastError = null;
   }
 
@@ -428,6 +430,8 @@ class MobileGameState {
     retryRequested = false;
     lastBatchTypes =
         parsed.map((message) => message.type).toList(growable: false);
+    lastBatchNormalizedCoreGhostCount =
+        parsed.where((message) => message.normalizedCoreGhost).length;
     for (final message in parsed) {
       apply(message, effectSlotResolver: effectSlotResolver);
     }

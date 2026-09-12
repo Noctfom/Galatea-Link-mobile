@@ -28,10 +28,24 @@ const Set<int> ocgInteractionTypes = <int>{
 };
 
 class OcgMessage {
-  const OcgMessage({required this.type, required this.payload});
+  // 保存一个已经归一化为标准网络布局的 OCG 消息
+  const OcgMessage({
+    required this.type,
+    required this.payload,
+    this.normalizedCoreGhost = false,
+  });
 
   final int type;
   final Uint8List payload;
+  final bool normalizedCoreGhost;
+}
+
+class _OcgPayloadSpan {
+  // 保存消息在原始流中的长度和 Core 幽灵布局标记
+  const _OcgPayloadSpan(this.length, {this.coreGhost = false});
+
+  final int length;
+  final bool coreGhost;
 }
 
 class OcgParser {
@@ -100,21 +114,165 @@ class OcgParser {
     var offset = 0;
     while (offset < data.length) {
       final type = data[offset++];
-      final payloadLength = const <int>{4, 6, 7, 8}.contains(type)
-          ? data.length - offset
-          : _payloadLength(type, data, offset);
+      final span = const <int>{4, 6, 7, 8}.contains(type)
+          ? _OcgPayloadSpan(data.length - offset)
+          : _resolvePayloadSpan(type, data, offset);
+      final payloadLength = span.length;
       if (payloadLength < 0 || offset + payloadLength > data.length) {
         throw YgoProtocolException(
           'OCG 消息 Type $type 长度不足 declared=$payloadLength remaining=${data.length - offset}',
         );
       }
-      messages.add(OcgMessage(
+      final rawPayload = Uint8List.fromList(
+        data.sublist(offset, offset + payloadLength),
+      );
+      messages.add(
+        OcgMessage(
           type: type,
-          payload: Uint8List.fromList(
-              data.sublist(offset, offset + payloadLength))));
+          payload: _normalizeCoreGhostPayload(type, rawPayload, span.coreGhost),
+          normalizedCoreGhost: span.coreGhost,
+        ),
+      );
       offset += payloadLength;
     }
     return messages;
+  }
+
+  // 解析标准网络布局或 Core 本地幽灵布局的原始长度
+  static _OcgPayloadSpan _resolvePayloadSpan(
+    int type,
+    Uint8List data,
+    int offset,
+  ) {
+    if (type == 16) return _selectChainSpan(data, offset);
+    if (type == 31) return _confirmCardsSpan(data, offset);
+    return _OcgPayloadSpan(_payloadLength(type, data, offset));
+  }
+
+  // 自动识别连锁选择消息是否包含 Core 的 Spe 和候选定界字段
+  static _OcgPayloadSpan _selectChainSpan(Uint8List data, int offset) {
+    _requireBytes(data, offset, 2);
+    final count = data[offset + 1];
+    final standardLength = 11 + count * 13;
+    final coreLength = 12 + count * 13 + (count > 0 ? count - 1 : 0);
+    return _chooseCompatibleSpan(
+      data,
+      offset,
+      standardLength: standardLength,
+      coreLength: coreLength,
+    );
+  }
+
+  // 自动识别确认卡片消息是否包含 Core 的额外幽灵字段
+  static _OcgPayloadSpan _confirmCardsSpan(Uint8List data, int offset) {
+    _requireBytes(data, offset, 2);
+    final standardLength = 2 + data[offset + 1] * 7;
+    var coreLength = data.length - offset + 1;
+    if (offset + 3 <= data.length) {
+      coreLength = 3 + data[offset + 2] * 7;
+    }
+    return _chooseCompatibleSpan(
+      data,
+      offset,
+      standardLength: standardLength,
+      coreLength: coreLength,
+    );
+  }
+
+  // 根据帧尾和下一消息边界选择兼容布局
+  static _OcgPayloadSpan _chooseCompatibleSpan(
+    Uint8List data,
+    int offset, {
+    required int standardLength,
+    required int coreLength,
+  }) {
+    final remaining = data.length - offset;
+    final standardFits = standardLength <= remaining;
+    final coreFits = coreLength <= remaining;
+    if (standardFits && remaining == standardLength) {
+      return _OcgPayloadSpan(standardLength);
+    }
+    if (coreFits && remaining == coreLength) {
+      return _OcgPayloadSpan(coreLength, coreGhost: true);
+    }
+    if (!standardFits && coreFits) {
+      return _OcgPayloadSpan(coreLength, coreGhost: true);
+    }
+    if (standardFits && !coreFits) return _OcgPayloadSpan(standardLength);
+    if (standardFits && coreFits) {
+      final standardNext = data[offset + standardLength];
+      final coreNext = data[offset + coreLength];
+      final standardBoundary = _isKnownMessageType(standardNext);
+      final coreBoundary = _isKnownMessageType(coreNext);
+      if (coreBoundary && !standardBoundary) {
+        return _OcgPayloadSpan(coreLength, coreGhost: true);
+      }
+    }
+    return _OcgPayloadSpan(standardLength);
+  }
+
+  // 将 Core 幽灵布局转换为移动端统一使用的标准网络布局
+  static Uint8List _normalizeCoreGhostPayload(
+    int type,
+    Uint8List payload,
+    bool coreGhost,
+  ) {
+    if (!coreGhost) return payload;
+    if (type == 31) {
+      return Uint8List.fromList(<int>[
+        payload[0],
+        ...payload.sublist(2),
+      ]);
+    }
+    if (type != 16) return payload;
+    final count = payload[1];
+    final normalized = BytesBuilder(copy: false)
+      ..add(payload.sublist(0, 2))
+      ..add(payload.sublist(3, 12));
+    var cursor = 12;
+    for (var index = 0; index < count; index++) {
+      if (index > 0) cursor += 1;
+      normalized.add(payload.sublist(cursor, cursor + 13));
+      cursor += 13;
+    }
+    return normalized.takeBytes();
+  }
+
+  // 判断字节是否可以作为下一条受支持 OCG 消息的类型
+  static bool _isKnownMessageType(int type) {
+    if (const <int>{4, 6, 7, 8}.contains(type) ||
+        _fixedLengths.containsKey(type)) {
+      return true;
+    }
+    return const <int>{
+      10,
+      11,
+      14,
+      15,
+      16,
+      20,
+      21,
+      22,
+      23,
+      25,
+      26,
+      30,
+      31,
+      33,
+      34,
+      36,
+      39,
+      42,
+      81,
+      83,
+      90,
+      130,
+      131,
+      142,
+      143,
+      163,
+      164,
+    }.contains(type);
   }
 
   // 计算固定或动态 OCG 消息的载荷长度
