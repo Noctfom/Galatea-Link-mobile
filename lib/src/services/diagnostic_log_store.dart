@@ -51,13 +51,17 @@ class DiagnosticLogEntry {
 
 class DiagnosticLogStore {
   static const Duration retention = Duration(days: 7);
-  static const int maximumEntries = 400;
-  static const int maximumStoredCharacters = 500000;
+  static const int maximumEntries = 1200;
+  static const int maximumStoredCharacters = 1500000;
+  static const Duration persistenceBatchDelay = Duration(milliseconds: 500);
   static const String _storageKey = 'galatea_mobile_diagnostic_logs_v1';
 
   SharedPreferences? _preferences;
   List<DiagnosticLogEntry> _entries = <DiagnosticLogEntry>[];
   Future<void> _writeTail = Future<void>.value();
+  Timer? _persistTimer;
+  bool _persistDirty = false;
+  int _storedCharacters = 2;
 
   // 返回从新到旧排列的近期日志副本
   List<DiagnosticLogEntry> get recent =>
@@ -81,37 +85,42 @@ class DiagnosticLogStore {
         _entries = <DiagnosticLogEntry>[];
       }
     }
+    _recalculateStoredCharacters();
     _trim();
     await _persist();
   }
 
-  // 追加一条已脱敏日志并串行写入本地偏好
+  // 追加一条已脱敏日志并合并密集时段的本地持久化写入
   Future<void> record(
     String event, {
     String level = 'info',
     Map<String, Object?> data = const <String, Object?>{},
   }) {
-    _entries.add(
-      DiagnosticLogEntry(
-        createdAt: DateTime.now(),
-        level: level,
-        event: event,
-        data: Map<String, Object?>.unmodifiable(
-          _sanitizeMap(data),
-        ),
+    final entry = DiagnosticLogEntry(
+      createdAt: DateTime.now(),
+      level: level,
+      event: event,
+      data: Map<String, Object?>.unmodifiable(
+        _sanitizeMap(data),
       ),
     );
+    if (_entries.isNotEmpty) _storedCharacters += 1;
+    _entries.add(entry);
+    _storedCharacters += _encodedEntryLength(entry);
     _trim();
-    _writeTail = _writeTail.then((_) async {
-      await _persist();
-    });
-    return _writeTail;
+    _persistDirty = true;
+    _schedulePersist();
+    return Future<void>.value();
   }
 
   // 清空设备上保存的全部诊断日志
   Future<void> clear() {
+    _persistTimer?.cancel();
+    _persistTimer = null;
+    _persistDirty = false;
     _writeTail = _writeTail.then((_) async {
       _entries = <DiagnosticLogEntry>[];
+      _storedCharacters = 2;
       await _persist();
     });
     return _writeTail;
@@ -119,7 +128,7 @@ class DiagnosticLogStore {
 
   // 等待现有写入完成并生成便于跨设备分析的 JSONL 文本
   Future<String> exportJsonLines() async {
-    await _writeTail;
+    await _flushPendingPersist();
     final lines = <String>[
       jsonEncode(<String, Object?>{
         'schema': 'galatea.mobile.logs.v1',
@@ -145,15 +154,54 @@ class DiagnosticLogStore {
   // 删除过期记录并限制条目数量和序列化体积
   void _trim() {
     final cutoff = DateTime.now().toUtc().subtract(retention);
+    final previousLength = _entries.length;
     _entries.removeWhere((entry) => entry.createdAt.toUtc().isBefore(cutoff));
+    if (_entries.length != previousLength) _recalculateStoredCharacters();
     if (_entries.length > maximumEntries) {
       _entries.removeRange(0, _entries.length - maximumEntries);
+      _recalculateStoredCharacters();
     }
-    while (_entries.isNotEmpty &&
-        jsonEncode(_entries.map((entry) => entry.toJson()).toList()).length >
-            maximumStoredCharacters) {
-      _entries.removeAt(0);
+    while (_entries.isNotEmpty && _storedCharacters > maximumStoredCharacters) {
+      final removed = _entries.removeAt(0);
+      _storedCharacters -= _encodedEntryLength(removed);
+      if (_entries.isNotEmpty) _storedCharacters -= 1;
     }
+  }
+
+  // 延迟启动一次日志写入以合并同一批高频网络事件
+  void _schedulePersist() {
+    if (_persistTimer != null) return;
+    _persistTimer = Timer(persistenceBatchDelay, () {
+      _persistTimer = null;
+      if (!_persistDirty) return;
+      _persistDirty = false;
+      _writeTail = _writeTail.then((_) => _persist());
+    });
+  }
+
+  // 在导出前立即提交尚未落盘的诊断日志
+  Future<void> _flushPendingPersist() {
+    _persistTimer?.cancel();
+    _persistTimer = null;
+    if (_persistDirty) {
+      _persistDirty = false;
+      _writeTail = _writeTail.then((_) => _persist());
+    }
+    return _writeTail;
+  }
+
+  // 重新计算当前日志数组的近似 JSON 字符数
+  void _recalculateStoredCharacters() {
+    _storedCharacters = 2;
+    for (var index = 0; index < _entries.length; index++) {
+      if (index > 0) _storedCharacters += 1;
+      _storedCharacters += _encodedEntryLength(_entries[index]);
+    }
+  }
+
+  // 返回单条日志序列化后的字符数
+  static int _encodedEntryLength(DiagnosticLogEntry entry) {
+    return jsonEncode(entry.toJson()).length;
   }
 
   // 将当前日志集合写入本地持久化存储
@@ -192,14 +240,21 @@ class DiagnosticLogStore {
   // 判断日志字段名是否可能包含认证或房间机密
   static bool _isSensitiveKey(String key) {
     final normalized = key.toLowerCase().replaceAll('-', '_');
+    if (normalized == 'tokens' ||
+        normalized.endsWith('_tokens') ||
+        normalized.endsWith('_token_count')) {
+      return false;
+    }
     return const <String>[
-      'password',
-      'passphrase',
-      'token',
-      'api_key',
-      'authorization',
-      'secret',
-      'credential',
-    ].any(normalized.contains);
+          'password',
+          'passphrase',
+          'api_key',
+          'authorization',
+          'secret',
+          'credential',
+        ].any(normalized.contains) ||
+        normalized == 'token' ||
+        normalized.startsWith('token_') ||
+        normalized.endsWith('_token');
   }
 }

@@ -43,13 +43,13 @@ Set-Location E:\flutter_app\galatea_link_mobile
 `pubspec.yaml` 使用 `主版本.次版本.修订号+内部版本号`：
 
 ```text
-version: 0.2.1+5
+version: 0.2.2+6
 ```
 
 - `versionName` 用于用户阅读和 Git 标签
 - `versionCode` 必须在每次发布时严格递增，更新判断以它为准
-- 稳定版 Git 标签建议使用 `v0.2.1`
-- APK 文件名建议使用 `Galatea-Link-mobile-v0.2.1-universal.apk`
+- 稳定版 Git 标签建议使用 `v0.2.2`
+- APK 文件名建议使用 `Galatea-Link-mobile-v0.2.2-universal.apk`
 
 ## 稳定版更新清单
 
@@ -65,20 +65,20 @@ https://galatea.noctfom.top/mobile/update.json
 {
   "schema_version": 1,
   "channel": "stable",
-  "version_name": "0.2.1",
-  "version_code": 5,
+  "version_name": "0.2.2",
+  "version_code": 6,
   "minimum_supported_version_code": 1,
-  "download_url": "https://github.com/Noctfom/Galatea-Link-mobile/releases/download/v0.2.1/Galatea-Link-mobile-v0.2.1-universal.apk",
-  "release_page_url": "https://github.com/Noctfom/Galatea-Link-mobile/releases/tag/v0.2.1",
+  "download_url": "https://github.com/Noctfom/Galatea-Link-mobile/releases/download/v0.2.2/Galatea-Link-mobile-v0.2.2-universal.apk",
+  "release_page_url": "https://github.com/Noctfom/Galatea-Link-mobile/releases/tag/v0.2.2",
   "sha256": "填写 APK 的六十四位 SHA-256 小写或大写十六进制值",
   "release_notes": "本次稳定版的简短说明",
-  "published_at": "2026-09-13T00:00:00Z"
+  "published_at": "2026-09-14T00:00:00Z"
 }
 ```
 
 `download_url` 和 `release_page_url` 必须是 HTTPS，应用限制清单最大为 256 KiB。当前实现只展示结果并由系统浏览器打开发布页，不申请安装未知应用权限，也不会静默下载或安装 APK
 
-自定义域名尚未部署清单时，设置页会明确显示更新服务尚未发布或网络错误，不影响游戏、模型和 LLM 功能
+更新清单暂时不可用时，设置页会明确显示更新服务尚未发布或网络错误，不影响游戏、模型和 LLM 功能
 
 ## 发布步骤
 
@@ -94,12 +94,12 @@ GitHub Release 上传 APK 后，可以使用仓库工具生成清单：
 
 ```powershell
 .\scripts\generate_update_manifest.ps1 `
-  -ApkPath '.\build\app\outputs\flutter-apk\app-release.apk' `
-  -VersionName '0.2.1' `
-  -VersionCode 5 `
-  -DownloadUrl 'https://github.com/Noctfom/Galatea-Link-mobile/releases/download/v0.2.1/Galatea-Link-mobile-v0.2.1-universal.apk' `
-  -ReleasePageUrl 'https://github.com/Noctfom/Galatea-Link-mobile/releases/tag/v0.2.1' `
-  -ReleaseNotes '本次稳定版说明' `
+  -ApkPath '.\build\release\Galatea-Link-mobile-v0.2.2-universal.apk' `
+  -VersionName '0.2.2' `
+  -VersionCode 6 `
+  -DownloadUrl 'https://github.com/Noctfom/Galatea-Link-mobile/releases/download/v0.2.2/Galatea-Link-mobile-v0.2.2-universal.apk' `
+  -ReleasePageUrl 'https://github.com/Noctfom/Galatea-Link-mobile/releases/tag/v0.2.2' `
+  -ReleaseNotes '修正本机 YGOMobile 自动等待和连接状态提示，增加详细卡组拒绝反馈与 Core 决策诊断' `
   -OutputPath '.\build\release\update.json'
 ```
 
@@ -108,7 +108,7 @@ GitHub Release 上传 APK 后，可以使用仓库工具生成清单：
 Windows 可以使用：
 
 ```powershell
-Get-FileHash .\build\app\outputs\flutter-apk\app-release.apk -Algorithm SHA256
+Get-FileHash .\build\release\Galatea-Link-mobile-v0.2.2-universal.apk -Algorithm SHA256
 ```
 
 建议为 `update.json` 设置较短缓存时间或在替换时执行 CDN 清理，避免旧清单长时间指向已撤回版本。若需要撤回问题版本，应先恢复到上一稳定清单，再处理 GitHub Release

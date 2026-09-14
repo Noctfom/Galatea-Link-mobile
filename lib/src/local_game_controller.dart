@@ -31,6 +31,30 @@ import 'services/mobile_platform_service.dart';
 import 'update/mobile_update_service.dart';
 
 class LocalGameController extends ChangeNotifier {
+  static const Duration localRoomWaitTimeout = Duration(minutes: 5);
+  static const Duration localRoomRetryInterval = Duration(seconds: 5);
+  static const Duration roomJoinConfirmTimeout = Duration(seconds: 12);
+  static const Set<String> _enteredRoomPhases = <String>{
+    'room_joined',
+    'seat_assigned',
+    'deck_sent',
+    'ready_sent',
+    'start_requested',
+    'duel_started',
+  };
+  static final Uri userGuideUri = Uri.https(
+    'github.com',
+    '/Noctfom/Galatea-Link-mobile/blob/main/docs/USER_GUIDE.md',
+  );
+  static final Uri changelogUri = Uri.https(
+    'github.com',
+    '/Noctfom/Galatea-Link-mobile/blob/main/CHANGELOG.md',
+  );
+  static final Uri projectRepositoryUri = Uri.https(
+    'github.com',
+    '/Noctfom/Galatea-Link-mobile',
+  );
+
   // 创建共享同一 ONNX 会话的本地游戏与决策控制器
   LocalGameController({required SecureSettingsStore store}) : _store = store {
     _updateService = MobileUpdateService(platformService: _platformService);
@@ -60,6 +84,9 @@ class LocalGameController extends ChangeNotifier {
   bool isCheckingUpdate = false;
   String? updateError;
   YgoClientState state = YgoClientState.disconnected;
+  bool isWaitingForLocalRoom = false;
+  DateTime? localRoomWaitDeadline;
+  int localRoomConnectionAttempts = 0;
   List<YgoServerMessage> messages = const <YgoServerMessage>[];
   List<Object> errors = const <Object>[];
   String? errorMessage;
@@ -93,6 +120,11 @@ class LocalGameController extends ChangeNotifier {
   int? lastCachedTokens;
   double? lastCoreConfidence;
   double? lastCoreValue;
+  Duration? lastDecisionPipelineElapsed;
+  Duration? lastCoreEncodingElapsed;
+  Duration? lastCoreInferenceElapsed;
+  DeckRejectionDetails? lastDeckRejection;
+  String? lastDeckRejectionCardName;
   List<int>? lastResponsePayload;
   int retryCount = 0;
   int protocolVersionRetryCount = 0;
@@ -117,6 +149,7 @@ class LocalGameController extends ChangeNotifier {
   DateTime? _lastResponseAt;
   int? _lastResponseActionType;
   Timer? _responseWatchdog;
+  Timer? _roomJoinWatchdog;
   String? _lastSentResponseKey;
   final Set<String> _rejectedResponseKeys = <String>{};
   DateTime? _lastAutomaticChatAt;
@@ -126,6 +159,7 @@ class LocalGameController extends ChangeNotifier {
   int? _readySeat;
   bool _startRequested = false;
   Future<void> _deckUpload = Future<void>.value();
+  int _localRoomWaitGeneration = 0;
 
   // 返回从新到旧排列的近期脱敏诊断日志
   List<DiagnosticLogEntry> get diagnosticLogs => _diagnosticLogStore.recent;
@@ -154,6 +188,35 @@ class LocalGameController extends ChangeNotifier {
   // 返回当前 LLM 临时覆盖状态
   MobileAutonomousOverride? get activeAutonomousOverride =>
       _interventionRuntime.activeOverride;
+
+  // 返回手机本地房间自动等待的剩余时间
+  Duration get localRoomWaitRemaining {
+    final deadline = localRoomWaitDeadline;
+    if (deadline == null) return Duration.zero;
+    final remaining = deadline.difference(DateTime.now());
+    return remaining.isNegative ? Duration.zero : remaining;
+  }
+
+  // 返回服务器是否已经确认客户端进入房间或对局
+  bool get hasEnteredRoom =>
+      state == YgoClientState.connected &&
+      _enteredRoomPhases.contains(roomPhase);
+
+  // 返回 TCP 已建立但服务器尚未确认进入房间的状态
+  bool get isAwaitingRoomJoin =>
+      state == YgoClientState.connected && roomPhase == 'joining';
+
+  // 返回与当前策略一致的决策进行中提示
+  String get activeDecisionLabel {
+    final effective = effectiveDecisionSettings;
+    return switch (effective.mode) {
+      'core_only' => 'Core 正在本地决策',
+      'hybrid' when effective.llmEnabled => 'Core 正在评估，必要时调用 LLM',
+      'hybrid' => 'Core 正在本地决策',
+      'llm_review' || 'llm_only' when effective.llmEnabled => 'LLM 正在异步决策',
+      _ => '本地规则正在决策',
+    };
+  }
 
   // 返回当前所选模型是否已经载入原生推理会话
   bool get isSelectedModelLoaded =>
@@ -263,6 +326,19 @@ class LocalGameController extends ChangeNotifier {
     final result = updateCheck;
     if (result == null) throw StateError('请先检查更新');
     await _updateService.openReleasePage(result);
+  }
+
+  // 使用系统浏览器打开项目仓库内经过限制的公开资料
+  Future<void> openProjectResource(Uri uri) async {
+    final segments = uri.pathSegments;
+    final isProjectResource = uri.scheme == 'https' &&
+        uri.host.toLowerCase() == 'github.com' &&
+        segments.length >= 2 &&
+        segments[0].toLowerCase() == 'noctfom' &&
+        segments[1].toLowerCase() == 'galatea-link-mobile';
+    if (!isProjectResource) throw const FormatException('项目资料地址不受信任');
+    final opened = await _platformService.openExternalUrl(uri);
+    if (!opened) throw StateError('系统浏览器无法打开该地址');
   }
 
   // 打开文件选择器并导入标准 YGOPro cards.cdb
@@ -507,13 +583,161 @@ class LocalGameController extends ChangeNotifier {
 
   // 启动一次允许服务器版本协商的游戏连接流程
   Future<void> connect(GameConnectionSettings nextSettings) async {
-    if (isBusy || state == YgoClientState.connected) {
+    if (isBusy || isWaitingForLocalRoom || state == YgoClientState.connected) {
       return;
     }
     _attemptedProtocolVersions.clear();
     protocolVersionRetryCount = 0;
     negotiatedProtocolVersion = null;
     await _connect(nextSettings);
+  }
+
+  // 套用手机本机 YGOMobile 配置并清除已保存的旧房间密码
+  Future<GameConnectionSettings> applyLocalYgoMobilePreset(
+    GameConnectionSettings currentSettings,
+  ) async {
+    final localSettings = currentSettings.asLocalYgoMobile();
+    settings = localSettings;
+    await _store.writeGameConnectionSettings(localSettings);
+    _recordLog(
+      'connection.local_preset.applied',
+      data: const <String, Object?>{
+        'host': GameConnectionSettings.localYgoMobileHost,
+        'port': GameConnectionSettings.localYgoMobilePort,
+        'password_cleared': true,
+      },
+    );
+    notifyListeners();
+    return localSettings;
+  }
+
+  // 等待手机本机 YGOMobile 建立房间并在五分钟内定期重试连接
+  Future<void> connectLocalYgoMobile(
+    GameConnectionSettings nextSettings,
+  ) async {
+    if (isBusy || isWaitingForLocalRoom || state == YgoClientState.connected) {
+      return;
+    }
+    if (deck == null || !deck!.isValid) {
+      throw const YgoProtocolException('请先选择有效的 YDK 卡组');
+    }
+    final localSettings = nextSettings.asLocalYgoMobile();
+    settings = localSettings;
+    await _store.writeGameConnectionSettings(localSettings);
+    _attemptedProtocolVersions.clear();
+    protocolVersionRetryCount = 0;
+    negotiatedProtocolVersion = null;
+    final waitGeneration = ++_localRoomWaitGeneration;
+    final deadline = DateTime.now().add(localRoomWaitTimeout);
+    isWaitingForLocalRoom = true;
+    localRoomWaitDeadline = deadline;
+    localRoomConnectionAttempts = 0;
+    state = YgoClientState.connecting;
+    roomPhase = 'waiting_local_room';
+    errorMessage = null;
+    await _platformService.startKeepAlive();
+    _recordLog(
+      'connection.local_wait.started',
+      data: <String, Object?>{
+        'host': localSettings.host,
+        'port': localSettings.port,
+        'timeout_seconds': localRoomWaitTimeout.inSeconds,
+        'retry_interval_seconds': localRoomRetryInterval.inSeconds,
+      },
+    );
+    notifyListeners();
+
+    Object? lastError;
+    while (waitGeneration == _localRoomWaitGeneration &&
+        DateTime.now().isBefore(deadline)) {
+      localRoomConnectionAttempts += 1;
+      state = YgoClientState.connecting;
+      roomPhase = 'waiting_local_room';
+      errorMessage = '正在等待手机本机 YGOMobile 房间，第 $localRoomConnectionAttempts 次尝试';
+      notifyListeners();
+      try {
+        await _connect(
+          localSettings,
+          preserveKeepAliveOnFailure: true,
+        );
+        if (waitGeneration != _localRoomWaitGeneration) return;
+        final joined = await _waitForLocalRoomJoin(waitGeneration, deadline);
+        if (waitGeneration != _localRoomWaitGeneration) return;
+        if (joined) {
+          isWaitingForLocalRoom = false;
+          localRoomWaitDeadline = null;
+          errorMessage = null;
+          _recordLog(
+            'connection.local_wait.connected',
+            data: <String, Object?>{
+              'attempts': localRoomConnectionAttempts,
+            },
+          );
+          notifyListeners();
+          return;
+        }
+        lastError ??= StateError('TCP 已连接但服务器未确认进入房间');
+      } catch (error) {
+        lastError = error;
+      }
+      if (waitGeneration != _localRoomWaitGeneration) return;
+      await _closeTransport(
+        finalRoomPhase: 'waiting_local_room',
+        preserveKeepAlive: true,
+      );
+      final remaining = deadline.difference(DateTime.now());
+      if (remaining <= Duration.zero) break;
+      state = YgoClientState.connecting;
+      roomPhase = 'waiting_local_room';
+      isBusy = false;
+      errorMessage = '本地房间尚未开启，将在 ${localRoomRetryInterval.inSeconds} 秒后重试';
+      notifyListeners();
+      await Future<void>.delayed(
+        remaining < localRoomRetryInterval ? remaining : localRoomRetryInterval,
+      );
+    }
+    if (waitGeneration != _localRoomWaitGeneration) return;
+    isWaitingForLocalRoom = false;
+    localRoomWaitDeadline = null;
+    await _closeTransport(finalRoomPhase: 'local_wait_timeout');
+    errorMessage = '等待手机本机 YGOMobile 房间超过五分钟，已停止连接'
+        '${lastError == null ? '' : '：$lastError'}';
+    _recordLog(
+      'connection.local_wait.timeout',
+      level: 'warning',
+      data: <String, Object?>{
+        'attempts': localRoomConnectionAttempts,
+        'last_error': lastError?.toString(),
+      },
+    );
+    notifyListeners();
+  }
+
+  // 等待服务器确认进入房间并识别连接被拒绝或提前关闭
+  Future<bool> _waitForLocalRoomJoin(
+    int waitGeneration,
+    DateTime overallDeadline,
+  ) async {
+    final joinDeadline = DateTime.now().add(localRoomRetryInterval);
+    final deadline =
+        joinDeadline.isBefore(overallDeadline) ? joinDeadline : overallDeadline;
+    while (waitGeneration == _localRoomWaitGeneration &&
+        DateTime.now().isBefore(deadline)) {
+      if (roomPhase == 'room_joined' ||
+          roomPhase == 'seat_assigned' ||
+          roomPhase == 'deck_sent' ||
+          roomPhase == 'ready_sent' ||
+          roomPhase == 'start_requested' ||
+          roomPhase == 'duel_started') {
+        return true;
+      }
+      if (state == YgoClientState.failed ||
+          state == YgoClientState.disconnected) {
+        return false;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    }
+    return false;
   }
 
   // 保存一份可从连接页快速恢复的服务器配置
@@ -567,7 +791,10 @@ class LocalGameController extends ChangeNotifier {
   }
 
   // 直接连接 MDPro3 游戏服务器并发送玩家登录信息
-  Future<void> _connect(GameConnectionSettings nextSettings) async {
+  Future<void> _connect(
+    GameConnectionSettings nextSettings, {
+    bool preserveKeepAliveOnFailure = false,
+  }) async {
     if (isBusy || state == YgoClientState.connected) {
       return;
     }
@@ -606,7 +833,12 @@ class LocalGameController extends ChangeNotifier {
     timePlayer = null;
     timeLeft = null;
     lastResponsePayload = null;
+    lastDecisionPipelineElapsed = null;
+    lastCoreEncodingElapsed = null;
+    lastCoreInferenceElapsed = null;
     retryCount = 0;
+    lastDeckRejection = null;
+    lastDeckRejectionCardName = null;
     _responseWatchdog?.cancel();
     _lastResponseAt = null;
     _lastResponseActionType = null;
@@ -673,6 +905,12 @@ class LocalGameController extends ChangeNotifier {
       await _store.writeGameConnectionSettings(settings);
       await client.sendPlayerInfo(settings.playerName);
       await client.sendJoinGame(password: settings.password);
+      if (!isWaitingForLocalRoom) {
+        _roomJoinWatchdog?.cancel();
+        _roomJoinWatchdog = Timer(roomJoinConfirmTimeout, () {
+          unawaited(_handleRoomJoinTimeout(generation));
+        });
+      }
       _recordLog('connection.established');
     } catch (error) {
       errorMessage = error.toString();
@@ -680,6 +918,7 @@ class LocalGameController extends ChangeNotifier {
       await _closeTransport(
         finalRoomPhase: 'disconnected',
         preserveProtocolRetry: _protocolRetryInProgress,
+        preserveKeepAlive: preserveKeepAliveOnFailure,
       );
       rethrow;
     } finally {
@@ -690,9 +929,33 @@ class LocalGameController extends ChangeNotifier {
     }
   }
 
+  // 在普通连接长时间未收到入房确认时返回连接页并保留错误
+  Future<void> _handleRoomJoinTimeout(int generation) async {
+    if (generation != _connectionGeneration || !isAwaitingRoomJoin) return;
+    errorMessage =
+        '服务器在 ${roomJoinConfirmTimeout.inSeconds} 秒内未确认进入房间，请检查地址、端口、房间编号、密码和协议版本';
+    state = YgoClientState.failed;
+    _recordLog(
+      'connection.room_join_timeout',
+      level: 'error',
+      data: <String, Object?>{
+        'host': settings.host,
+        'port': settings.port,
+        'game_id': settings.gameId,
+        'timeout_seconds': roomJoinConfirmTimeout.inSeconds,
+      },
+    );
+    notifyListeners();
+    await _closeTransport(finalRoomPhase: 'room_join_timeout');
+  }
+
   // 主动断开 MDPro3 游戏服务器连接
   Future<void> disconnect() async {
+    _localRoomWaitGeneration += 1;
+    isWaitingForLocalRoom = false;
+    localRoomWaitDeadline = null;
     _protocolRetryInProgress = false;
+    errorMessage = null;
     await _closeTransport(finalRoomPhase: 'disconnected');
   }
 
@@ -700,12 +963,15 @@ class LocalGameController extends ChangeNotifier {
   Future<void> _closeTransport({
     required String finalRoomPhase,
     bool preserveProtocolRetry = false,
+    bool preserveKeepAlive = false,
   }) async {
     _connectionGeneration += 1;
     _decisionGeneration += 1;
     isBusy = false;
     isDeciding = false;
     _responseWatchdog?.cancel();
+    _roomJoinWatchdog?.cancel();
+    _roomJoinWatchdog = null;
     await _messageSubscription?.cancel();
     await _errorSubscription?.cancel();
     await _closedSubscription?.cancel();
@@ -715,7 +981,9 @@ class LocalGameController extends ChangeNotifier {
     final client = _client;
     _client = null;
     await client?.dispose();
-    await _platformService.stopKeepAlive();
+    if (!preserveKeepAlive) {
+      await _platformService.stopKeepAlive();
+    }
     state = YgoClientState.disconnected;
     roomPhase = finalRoomPhase;
     assignedPlayer = null;
@@ -942,6 +1210,9 @@ class LocalGameController extends ChangeNotifier {
   // 释放本地对局控制器资源
   @override
   void dispose() {
+    _localRoomWaitGeneration += 1;
+    isWaitingForLocalRoom = false;
+    localRoomWaitDeadline = null;
     _responseWatchdog?.cancel();
     _messageSubscription?.cancel();
     _errorSubscription?.cancel();
@@ -993,9 +1264,13 @@ class LocalGameController extends ChangeNotifier {
       _handleGameChat(message.payload);
     }
     if (message.type == stocErrorMsg) {
+      _roomJoinWatchdog?.cancel();
+      _roomJoinWatchdog = null;
       _handleServerError(message.payload);
     }
     if (message.type == stocJoinGame) {
+      _roomJoinWatchdog?.cancel();
+      _roomJoinWatchdog = null;
       roomPhase = 'room_joined';
       roomDuelMode = parseRoomDuelMode(message.payload);
       roomReady = <int, bool>{0: false, 1: false, 2: false, 3: false};
@@ -1155,6 +1430,8 @@ class LocalGameController extends ChangeNotifier {
 
   // 保存网络或协议错误并切换失败状态
   void _handleError(Object error) {
+    _roomJoinWatchdog?.cancel();
+    _roomJoinWatchdog = null;
     errors = <Object>[error, ...errors].take(30).toList(growable: false);
     errorMessage = error.toString();
     state = YgoClientState.failed;
@@ -1171,6 +1448,47 @@ class LocalGameController extends ChangeNotifier {
     try {
       final parsed = parseServerErrorPayload(payload);
       final requiredVersion = parsed.code;
+      if (parsed.errorType == 2 && parsed.code != null) {
+        final rejection = decodeDeckRejectionCode(parsed.code!);
+        final cardName = rejection.cardCode == null
+            ? null
+            : _cardDatabaseService.lookup(rejection.cardCode!)?.name;
+        lastDeckRejection = rejection;
+        lastDeckRejectionCardName = cardName;
+        errorMessage = _describeDeckRejection(rejection, cardName);
+        if (isWaitingForLocalRoom) {
+          _localRoomWaitGeneration += 1;
+          isWaitingForLocalRoom = false;
+          localRoomWaitDeadline = null;
+        }
+        roomPhase = 'deck_rejected';
+        _readySeat = null;
+        final player = assignedPlayer;
+        if (player != null && player >= 0 && player <= 3) {
+          roomReady[player] = false;
+        }
+        _startRequested = false;
+        state = YgoClientState.failed;
+        _recordLog(
+          'server.deck_rejected',
+          level: 'error',
+          data: <String, Object?>{
+            'error_code': parsed.code,
+            'violation_code': rejection.violationCode,
+            'violation': rejection.violation,
+            'reason': rejection.reason,
+            'card_code': rejection.cardCode,
+            'card_name': cardName,
+            'reported_count': rejection.reportedCount,
+            'main_count': deck?.main.length,
+            'extra_count': deck?.extra.length,
+            'side_count': deck?.side.length,
+          },
+        );
+        notifyListeners();
+        unawaited(_closeTransport(finalRoomPhase: 'deck_rejected'));
+        return;
+      }
       if (parsed.errorType == 4 && requiredVersion != null) {
         final currentVersion = settings.protocolVersion;
         final canRetry = requiredVersion > 0 &&
@@ -1196,11 +1514,13 @@ class LocalGameController extends ChangeNotifier {
           unawaited(_retryProtocolVersion(requiredVersion));
         } else {
           state = YgoClientState.failed;
+          unawaited(
+            _closeTransport(finalRoomPhase: 'protocol_version_rejected'),
+          );
         }
       } else {
-        errorMessage = parsed.errorType == 2 && parsed.code != null
-            ? '服务器拒绝卡组，违规卡片代码 ${parsed.code}'
-            : '游戏服务器返回错误 ${parsed.errorType}${parsed.code == null ? '' : '，代码 ${parsed.code}'}';
+        errorMessage =
+            '游戏服务器返回错误 ${parsed.errorType}${parsed.code == null ? '' : '，代码 ${parsed.code}'}';
         state = YgoClientState.failed;
         _recordLog(
           'server.error',
@@ -1210,11 +1530,28 @@ class LocalGameController extends ChangeNotifier {
             'error_code': parsed.code,
           },
         );
+        unawaited(_closeTransport(finalRoomPhase: 'server_rejected'));
       }
       notifyListeners();
     } catch (error) {
       _handleProtocolError(error);
     }
+  }
+
+  // 组合服务器拒绝原因以及本地卡名和当前卡组数量
+  String _describeDeckRejection(
+    DeckRejectionDetails rejection,
+    String? cardName,
+  ) {
+    final detail = rejection.cardCode != null
+        ? '，涉及 ${cardName ?? '未知卡片'}（${rejection.cardCode}）'
+        : rejection.reportedCount != null
+            ? '，服务器报告 ${rejection.reportedCount} 张'
+            : '';
+    final currentCounts = deck == null
+        ? ''
+        : '；当前主卡组 ${deck!.main.length}、额外卡组 ${deck!.extra.length}、副卡组 ${deck!.side.length}';
+    return '服务器拒绝卡组：${rejection.reason}$detail$currentCounts，请修改卡组后重新连接';
   }
 
   // 使用服务器要求的协议版本关闭旧连接并保留卡组重新加入
@@ -1262,13 +1599,29 @@ class LocalGameController extends ChangeNotifier {
   // 在服务器主动关闭后同步页面状态并释放旧客户端资源
   void _handleRemoteClosed(int generation) {
     if (generation != _connectionGeneration || _protocolRetryInProgress) return;
+    _roomJoinWatchdog?.cancel();
+    _roomJoinWatchdog = null;
+    if (!isWaitingForLocalRoom && roomPhase != 'duel_ended') {
+      errorMessage ??= roomPhase == 'joining'
+          ? '服务器在确认进入房间前关闭了连接，请检查地址、端口、房间编号、密码和协议版本'
+          : '游戏服务器已关闭连接';
+    }
     final finalPhase =
         roomPhase == 'duel_ended' ? 'duel_ended' : 'connection_closed';
     _recordLog(
       'connection.remote_closed',
-      data: <String, Object?>{'room_phase': roomPhase},
+      level: finalPhase == 'duel_ended' ? 'info' : 'warning',
+      data: <String, Object?>{
+        'room_phase': roomPhase,
+        'error': errorMessage,
+      },
     );
-    unawaited(_closeTransport(finalRoomPhase: finalPhase));
+    unawaited(
+      _closeTransport(
+        finalRoomPhase: finalPhase,
+        preserveKeepAlive: isWaitingForLocalRoom,
+      ),
+    );
   }
 
   // 对局结束后主动归还本地监听端口并保留对局日志
@@ -1403,6 +1756,8 @@ class LocalGameController extends ChangeNotifier {
   Future<void> _handlePendingAction(int decisionGeneration) async {
     final action = gameState.pendingAction;
     if (action == null || (assignedPlayer != 0 && assignedPlayer != 1)) return;
+    final effectiveSettings = _interventionRuntime.effective;
+    final pipelineStopwatch = Stopwatch()..start();
     isDeciding = true;
     _recordLog(
       'decision.started',
@@ -1416,10 +1771,15 @@ class LocalGameController extends ChangeNotifier {
         'selection_max': action.selectionMax,
         'cancelable': action.cancelable,
         'finishable': action.finishable,
+        'effective_mode': effectiveSettings.mode,
+        'llm_enabled': effectiveSettings.llmEnabled,
+        'llm_allowed': effectiveSettings.llmEnabled &&
+            const <String>{'hybrid', 'llm_review', 'llm_only'}
+                .contains(effectiveSettings.mode),
+        'core_model_loaded': _onnxRuntimeService.isLoaded,
       },
     );
     notifyListeners();
-    final effectiveSettings = _interventionRuntime.effective;
     late final MobileDecisionOutcome outcome;
     try {
       outcome = await _decisionEngine.decide(
@@ -1432,6 +1792,7 @@ class LocalGameController extends ChangeNotifier {
         gameChatContext: _gameChatHistory.toPromptContext(),
       );
     } catch (error, stackTrace) {
+      pipelineStopwatch.stop();
       if (decisionGeneration != _decisionGeneration ||
           !identical(gameState.pendingAction, action)) {
         return;
@@ -1445,12 +1806,14 @@ class LocalGameController extends ChangeNotifier {
         data: <String, Object?>{
           'action_type': action.type,
           'error': error.toString(),
+          'pipeline_elapsed_ms': pipelineStopwatch.elapsedMilliseconds,
           'stack': _truncateLog(stackTrace.toString()),
         },
       );
       notifyListeners();
       return;
     }
+    pipelineStopwatch.stop();
     if (decisionGeneration != _decisionGeneration ||
         !identical(gameState.pendingAction, action)) {
       return;
@@ -1465,6 +1828,9 @@ class LocalGameController extends ChangeNotifier {
     lastCachedTokens = outcome.cachedTokens;
     lastCoreConfidence = outcome.coreConfidence;
     lastCoreValue = outcome.coreValue;
+    lastDecisionPipelineElapsed = pipelineStopwatch.elapsed;
+    lastCoreEncodingElapsed = outcome.coreEncodingElapsed;
+    lastCoreInferenceElapsed = outcome.coreInferenceElapsed;
     _recordLog(
       'decision.completed',
       data: <String, Object?>{
@@ -1472,6 +1838,11 @@ class LocalGameController extends ChangeNotifier {
         'source': outcome.source,
         'description': outcome.description,
         'elapsed_ms': outcome.elapsed.inMilliseconds,
+        'pipeline_elapsed_ms': pipelineStopwatch.elapsedMilliseconds,
+        'core_encoding_ms': outcome.coreEncodingElapsed?.inMilliseconds,
+        'core_inference_ms': outcome.coreInferenceElapsed?.inMilliseconds,
+        'effective_mode': effectiveSettings.mode,
+        'llm_enabled': effectiveSettings.llmEnabled,
         'prompt_tokens': outcome.promptTokens,
         'completion_tokens': outcome.completionTokens,
         'cached_tokens': outcome.cachedTokens,

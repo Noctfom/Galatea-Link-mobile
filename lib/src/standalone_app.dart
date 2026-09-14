@@ -60,7 +60,8 @@ class _StandaloneAppState extends State<StandaloneApp> {
             ),
           );
         }
-        final connected = widget.controller.state == YgoClientState.connected;
+        final activeSession = widget.controller.hasEnteredRoom ||
+            widget.controller.isWaitingForLocalRoom;
         return MaterialApp(
           title: 'Galatea Link mobile',
           debugShowCheckedModeBanner: false,
@@ -79,7 +80,7 @@ class _StandaloneAppState extends State<StandaloneApp> {
             ),
             useMaterial3: true,
           ),
-          home: connected
+          home: activeSession
               ? StandaloneHome(controller: widget.controller)
               : GameConnectionScreen(controller: widget.controller),
         );
@@ -106,6 +107,7 @@ class _GameConnectionScreenState extends State<GameConnectionScreen> {
   late final TextEditingController _gameIdController;
   bool _preferSecond = false;
   String _deckLabel = '尚未选择 YDK 卡组';
+  String? _lastShownConnectionError;
 
   // 初始化游戏服务器连接表单
   @override
@@ -123,18 +125,44 @@ class _GameConnectionScreenState extends State<GameConnectionScreen> {
       _deckLabel =
           '${deck.name} · 主卡组 ${deck.main.length} · 额外 ${deck.extra.length}';
     }
-    WidgetsBinding.instance.addPostFrameCallback((_) => _offerClipboardDeck());
+    widget.controller.addListener(_handleConnectionStateChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _handleConnectionStateChanged();
+      _offerClipboardDeck();
+    });
   }
 
   // 释放游戏连接表单控制器
   @override
   void dispose() {
+    widget.controller.removeListener(_handleConnectionStateChanged);
     _hostController.dispose();
     _portController.dispose();
     _passwordController.dispose();
     _nameController.dispose();
     _gameIdController.dispose();
     super.dispose();
+  }
+
+  // 在连接页显示同步失败和远端异步关闭的统一提示
+  void _handleConnectionStateChanged() {
+    if (!mounted) return;
+    final message = widget.controller.errorMessage;
+    if (message == null || message.isEmpty) {
+      _lastShownConnectionError = null;
+      return;
+    }
+    if (widget.controller.isWaitingForLocalRoom ||
+        message == _lastShownConnectionError) {
+      return;
+    }
+    _lastShownConnectionError = message;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || widget.controller.errorMessage != message) return;
+      final messenger = ScaffoldMessenger.of(context);
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(SnackBar(content: Text(message)));
+    });
   }
 
   // 解析整数输入并显示表单错误
@@ -176,16 +204,37 @@ class _GameConnectionScreenState extends State<GameConnectionScreen> {
     });
   }
 
-  // 应用同一台手机上 YGOMobile 本地房间快捷配置
-  void _applyLocalYgoMobilePreset() {
-    _hostController.text = '127.0.0.1';
-    _portController.text = '7911';
-    _gameIdController.text = '0';
+  // 应用手机本机 YGOMobile 配置并启动限时房间等待
+  Future<void> _applyLocalYgoMobilePreset() async {
+    FocusScope.of(context).unfocus();
+    final currentSettings = widget.controller.settings.copyWith(
+      playerName: _nameController.text.trim(),
+      preferSecond: _preferSecond,
+    );
+    final localSettings = await widget.controller.applyLocalYgoMobilePreset(
+      currentSettings,
+    );
+    if (!mounted) return;
+    _applyProfile(localSettings);
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('已套用手机本机 YGOMobile 配置 127.0.0.1:7911'),
+        content: Text('已套用 172.19.0.1:7911 并清除旧密码，正在等待本地房间'),
       ),
     );
+    if (widget.controller.deck == null || !widget.controller.deck!.isValid) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('请先选择有效的 YDK 卡组')));
+      return;
+    }
+    try {
+      await widget.controller.connectLocalYgoMobile(localSettings);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(widget.controller.errorMessage ?? '本地房间连接失败')),
+      );
+    }
   }
 
   // 将当前连接表单保存为命名快捷配置
@@ -338,13 +387,18 @@ class _GameConnectionScreenState extends State<GameConnectionScreen> {
       return;
     }
     try {
-      await widget.controller.connect(
-        nextSettings,
-      );
-    } catch (_) {
-      if (!mounted) return;
+      if (nextSettings.isLocalYgoMobile) {
+        _passwordController.clear();
+        _gameIdController.text =
+            GameConnectionSettings.localYgoMobileGameId.toString();
+        await widget.controller.connectLocalYgoMobile(nextSettings);
+      } else {
+        await widget.controller.connect(nextSettings);
+      }
+    } catch (error) {
+      if (!mounted || widget.controller.errorMessage != null) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(widget.controller.errorMessage ?? '游戏服务器连接失败')),
+        SnackBar(content: Text('游戏服务器连接失败：$error')),
       );
     }
   }
@@ -369,6 +423,7 @@ class _GameConnectionScreenState extends State<GameConnectionScreen> {
   @override
   Widget build(BuildContext context) {
     final controller = widget.controller;
+    final awaitingRoom = controller.isAwaitingRoomJoin;
     return Scaffold(
       appBar: AppBar(
         title: const Text('连接游戏服务器'),
@@ -449,7 +504,9 @@ class _GameConnectionScreenState extends State<GameConnectionScreen> {
                         runSpacing: 8,
                         children: [
                           OutlinedButton.icon(
-                            onPressed: _applyLocalYgoMobilePreset,
+                            onPressed: controller.isBusy || awaitingRoom
+                                ? null
+                                : _applyLocalYgoMobilePreset,
                             icon: const Icon(Icons.phone_android_outlined),
                             label: const Text('手机本机 YGOMobile'),
                           ),
@@ -518,7 +575,9 @@ class _GameConnectionScreenState extends State<GameConnectionScreen> {
                       ),
                       const SizedBox(height: 10),
                       OutlinedButton.icon(
-                        onPressed: controller.isBusy ? null : _pickDeck,
+                        onPressed: controller.isBusy || awaitingRoom
+                            ? null
+                            : _pickDeck,
                         icon: const Icon(Icons.style_outlined),
                         label: const Text('选择与管理卡组'),
                       ),
@@ -537,29 +596,36 @@ class _GameConnectionScreenState extends State<GameConnectionScreen> {
                       ),
                       const SizedBox(height: 10),
                       FilledButton.icon(
-                        onPressed: controller.isBusy ||
-                                controller.deck == null ||
-                                !controller.deck!.isValid
-                            ? null
-                            : _connect,
-                        icon: controller.isBusy
-                            ? const SizedBox.square(
-                                dimension: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Icon(Icons.login),
+                        onPressed: awaitingRoom
+                            ? controller.disconnect
+                            : controller.isBusy ||
+                                    controller.deck == null ||
+                                    !controller.deck!.isValid
+                                ? null
+                                : _connect,
+                        icon: awaitingRoom
+                            ? const Icon(Icons.close)
+                            : controller.isBusy
+                                ? const SizedBox.square(
+                                    dimension: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.login),
                         label: Text(
-                          controller.isBusy
-                              ? '连接中'
-                              : controller.deck == null ||
-                                      !controller.deck!.isValid
-                                  ? '请先选择卡组'
-                                  : '连接游戏',
+                          awaitingRoom
+                              ? '取消连接'
+                              : controller.isBusy
+                                  ? '连接中'
+                                  : controller.deck == null ||
+                                          !controller.deck!.isValid
+                                      ? '请先选择卡组'
+                                      : '连接游戏',
                         ),
                       ),
-                      if (controller.errorMessage != null) ...[
+                      if (controller.errorMessage != null &&
+                          controller.lastDeckRejection == null) ...[
                         const SizedBox(height: 12),
                         Text(
                           controller.errorMessage!,
@@ -568,9 +634,47 @@ class _GameConnectionScreenState extends State<GameConnectionScreen> {
                           ),
                         ),
                       ],
+                      if (controller.lastDeckRejection
+                          case final rejection?) ...[
+                        const SizedBox(height: 12),
+                        Card(
+                          color: Theme.of(context).colorScheme.errorContainer,
+                          child: Padding(
+                            padding: const EdgeInsets.all(14),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '卡组未通过服务器检验',
+                                  style: Theme.of(context).textTheme.titleSmall,
+                                ),
+                                const SizedBox(height: 6),
+                                Text(rejection.reason),
+                                if (rejection.cardCode != null)
+                                  Text(
+                                    '涉及 ${controller.lastDeckRejectionCardName ?? '未知卡片'}（${rejection.cardCode}）',
+                                  ),
+                                if (rejection.reportedCount != null)
+                                  Text('服务器报告 ${rejection.reportedCount} 张'),
+                                if (controller.deck case final currentDeck?)
+                                  Text(
+                                    '当前主卡组 ${currentDeck.main.length} · 额外卡组 ${currentDeck.extra.length} · 副卡组 ${currentDeck.side.length}',
+                                  ),
+                                const SizedBox(height: 8),
+                                FilledButton.tonalIcon(
+                                  onPressed:
+                                      controller.isBusy ? null : _pickDeck,
+                                  icon: const Icon(Icons.edit_outlined),
+                                  label: const Text('修改卡组'),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
                       const SizedBox(height: 14),
                       const Text(
-                        '密码只写入本机安全存储。模拟器访问电脑使用 10.0.2.2，实体机使用电脑局域网 IP。连接期间会显示保活通知',
+                        '密码只写入本机安全存储。手机本机 YGOMobile 使用 172.19.0.1:7911 并在后台等待房间最多五分钟；模拟器访问电脑使用 10.0.2.2，实体机访问电脑使用局域网 IP',
                         style: TextStyle(fontSize: 12),
                       ),
                     ],
@@ -641,7 +745,9 @@ class _StandaloneHomeState extends State<StandaloneHome> {
             ),
           ),
           IconButton(
-            onPressed: controller.isBusy ? null : controller.disconnect,
+            onPressed: controller.isBusy && !controller.isWaitingForLocalRoom
+                ? null
+                : controller.disconnect,
             icon: const Icon(Icons.logout),
             tooltip: '断开游戏',
           ),
@@ -683,6 +789,8 @@ class LocalOverviewPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final effectiveSettings = controller.effectiveDecisionSettings;
     final activeOverride = controller.activeAutonomousOverride;
+    final remainingSeconds = controller.localRoomWaitRemaining.inSeconds;
+    final remainingMinutes = ((remainingSeconds + 59) ~/ 60).clamp(0, 5);
     final readyPlayers = controller.roomReady.entries
         .where((entry) => entry.value)
         .map((entry) => entry.key)
@@ -699,6 +807,28 @@ class LocalOverviewPage extends StatelessWidget {
         Text(
           '大厅身份：${controller.isRoomHost ? '房主' : '参与者'} · 模式 ${controller.roomDuelMode == 2 ? '双打' : '单打'} · 已准备 ${readyPlayers.isEmpty ? '-' : readyPlayers}',
         ),
+        if (controller.isWaitingForLocalRoom) ...[
+          const SizedBox(height: 10),
+          Card(
+            color: Theme.of(context).colorScheme.secondaryContainer,
+            child: ListTile(
+              leading: const SizedBox.square(
+                dimension: 24,
+                child: CircularProgressIndicator(strokeWidth: 2.5),
+              ),
+              title: const Text('正在等待手机本机 YGOMobile 房间'),
+              subtitle: Text(
+                '每 ${LocalGameController.localRoomRetryInterval.inSeconds} 秒尝试一次 · '
+                '第 ${controller.localRoomConnectionAttempts} 次 · '
+                '剩余约 $remainingMinutes 分钟',
+              ),
+              trailing: TextButton(
+                onPressed: controller.disconnect,
+                child: const Text('取消'),
+              ),
+            ),
+          ),
+        ],
         Text(
           'Core 玩家：${controller.gameState.playerId} · 计时玩家：${controller.timePlayer ?? '-'} · 剩余：${controller.timeLeft ?? '-'} 秒',
         ),
@@ -776,11 +906,15 @@ class LocalOverviewPage extends StatelessWidget {
                   const SizedBox(height: 8),
                   const LinearProgressIndicator(),
                   const SizedBox(height: 6),
-                  const Text('LLM 正在异步决策'),
+                  Text(controller.activeDecisionLabel),
                 ],
                 if (controller.lastDecisionElapsed != null)
                   Text(
                     '耗时 ${controller.lastDecisionElapsed!.inMilliseconds} ms · Prompt ${controller.lastPromptTokens ?? '-'} · Completion ${controller.lastCompletionTokens ?? '-'} · 缓存 Token ${controller.lastCachedTokens ?? '-'}',
+                  ),
+                if (controller.lastDecisionPipelineElapsed != null)
+                  Text(
+                    '完整管线 ${controller.lastDecisionPipelineElapsed!.inMilliseconds} ms · Core 编码 ${controller.lastCoreEncodingElapsed?.inMilliseconds ?? '-'} ms · Core 推理 ${controller.lastCoreInferenceElapsed?.inMilliseconds ?? '-'} ms',
                   ),
                 if (controller.lastCoreConfidence != null)
                   Text(
@@ -1731,7 +1865,7 @@ class _LocalSettingsPageState extends State<LocalSettingsPage> {
     final settings = widget.controller.decisionSettings;
     _mode = settings.mode;
     _policy = settings.corePolicyMode;
-    _coreTemperature = settings.coreTemperature;
+    _coreTemperature = settings.coreTemperature.clamp(0.05, 2).toDouble();
     _threshold = settings.coreConfidenceThreshold;
     _llmEnabled = settings.llmEnabled;
     _autonomyEnabled = settings.autonomyEnabled;
@@ -1999,6 +2133,18 @@ class _LocalSettingsPageState extends State<LocalSettingsPage> {
     }
   }
 
+  // 使用系统浏览器打开项目使用说明或版本资料
+  Future<void> _openProjectResource(Uri uri, String label) async {
+    try {
+      await widget.controller.openProjectResource(uri);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('无法打开$label：$error')));
+    }
+  }
+
   // 展示应用的数据处理边界摘要
   Future<void> _showPrivacySummary() async {
     await showDialog<void>(
@@ -2112,6 +2258,30 @@ class _LocalSettingsPageState extends State<LocalSettingsPage> {
                   onPressed: _showOpenSourceLicenses,
                   icon: const Icon(Icons.balance_outlined),
                   label: const Text('开源许可'),
+                ),
+                TextButton.icon(
+                  onPressed: () => _openProjectResource(
+                    LocalGameController.userGuideUri,
+                    '使用文档',
+                  ),
+                  icon: const Icon(Icons.menu_book_outlined),
+                  label: const Text('使用文档'),
+                ),
+                TextButton.icon(
+                  onPressed: () => _openProjectResource(
+                    LocalGameController.changelogUri,
+                    '版本记录',
+                  ),
+                  icon: const Icon(Icons.history_outlined),
+                  label: const Text('版本记录'),
+                ),
+                TextButton.icon(
+                  onPressed: () => _openProjectResource(
+                    LocalGameController.projectRepositoryUri,
+                    '项目仓库',
+                  ),
+                  icon: const Icon(Icons.code_outlined),
+                  label: const Text('项目仓库'),
                 ),
               ],
             ),
@@ -2342,8 +2512,8 @@ class _LocalSettingsPageState extends State<LocalSettingsPage> {
                 Slider(
                   value: _coreTemperature,
                   min: 0.05,
-                  max: 5,
-                  divisions: 99,
+                  max: 2,
+                  divisions: 39,
                   onChanged: (value) =>
                       setState(() => _coreTemperature = value),
                 ),

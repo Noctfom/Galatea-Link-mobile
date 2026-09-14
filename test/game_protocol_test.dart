@@ -139,4 +139,18 @@ void main() {
       (errorType: 2, code: null),
     );
   });
+
+  // 验证卡组错误位域可以区分违规卡片和区域数量
+  test('decodes detailed deck rejection fields', () {
+    final banned = decodeDeckRejectionCode((1 << 28) | 89631139);
+    final extraCount = decodeDeckRejectionCode((7 << 28) | 16);
+
+    expect(banned.violation, 'lf_list');
+    expect(banned.reason, contains('禁限卡表'));
+    expect(banned.cardCode, 89631139);
+    expect(banned.reportedCount, isNull);
+    expect(extraCount.violation, 'extra_count');
+    expect(extraCount.cardCode, isNull);
+    expect(extraCount.reportedCount, 16);
+  });
 }

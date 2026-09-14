@@ -24,6 +24,8 @@ class MobileDecisionOutcome {
     this.cachedTokens,
     this.coreConfidence,
     this.coreValue,
+    this.coreEncodingElapsed,
+    this.coreInferenceElapsed,
     this.interventionUpdate,
   });
 
@@ -39,6 +41,8 @@ class MobileDecisionOutcome {
   final int? cachedTokens;
   final double? coreConfidence;
   final double? coreValue;
+  final Duration? coreEncodingElapsed;
+  final Duration? coreInferenceElapsed;
   final MobileInterventionUpdate? interventionUpdate;
 }
 
@@ -203,6 +207,8 @@ class MobileDecisionEngine {
         cachedTokens: result.cachedTokens,
         coreConfidence: coreDecision?.confidence,
         coreValue: coreDecision?.value,
+        coreEncodingElapsed: coreDecision?.encodingElapsed,
+        coreInferenceElapsed: coreDecision?.elapsed,
         interventionUpdate: result.interventionUpdate,
       );
     } on LlmDecisionException catch (error) {
@@ -226,6 +232,8 @@ class MobileDecisionEngine {
         rawLlmContent: error.rawContent,
         coreConfidence: coreDecision?.confidence,
         coreValue: coreDecision?.value,
+        coreEncodingElapsed: coreDecision?.encodingElapsed,
+        coreInferenceElapsed: coreDecision?.elapsed,
       );
     } catch (error) {
       final coreFallback = coreDecision == null
@@ -247,6 +255,8 @@ class MobileDecisionEngine {
             : 'LLM 决策异常并回退为 ${selectedFallback.description}: $error',
         coreConfidence: coreDecision?.confidence,
         coreValue: coreDecision?.value,
+        coreEncodingElapsed: coreDecision?.encodingElapsed,
+        coreInferenceElapsed: coreDecision?.elapsed,
       );
     }
   }
@@ -261,9 +271,11 @@ class MobileDecisionEngine {
       source: 'core_onnx',
       description:
           '本地 ONNX 选择 ${decision.candidate.label}，置信度 ${(decision.confidence * 100).toStringAsFixed(1)}%',
-      elapsed: decision.elapsed,
+      elapsed: decision.encodingElapsed + decision.elapsed,
       coreConfidence: decision.confidence,
       coreValue: decision.value,
+      coreEncodingElapsed: decision.encodingElapsed,
+      coreInferenceElapsed: decision.elapsed,
     );
   }
 

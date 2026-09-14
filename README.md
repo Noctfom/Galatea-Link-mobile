@@ -2,7 +2,7 @@
 
 Galatea Link 的独立 Flutter 移动客户端，直接连接 MDPro3/YGOPro 游戏服务器并在设备本地运行 Agent 流程，不依赖 PC Link API、AstrBot、Python 或 Torch
 
-当前版本为 `0.2.1+5`，Android 应用标识为 `com.noctfom.galatealink`。Android 模拟器上的本地房间、233 在线房间、完整卡组上传和 LLM 连续操作已经打通，实体设备兼容性验证正在进行
+当前稳定版本为 `0.2.2+6`，上一稳定版为 `0.2.1+5`，Android 应用标识为 `com.noctfom.galatealink`。Android 模拟器上的本地房间、233 在线房间、完整卡组上传和 LLM 连续操作已经打通，0.2.2 正式包已生成并等待覆盖升级复核
 
 ## 当前能力
 
@@ -45,6 +45,8 @@ Windows 如果在 `flutter pub get` 中看到插件需要符号链接的提示�
 build/app/outputs/flutter-apk/app-release.apk
 ```
 
+正式发布时将已签名通用包重命名为 `build/release/Galatea-Link-mobile-v0.2.2-universal.apk`，并在同一目录生成 SHA-256 文件与 `update.json`
+
 实体设备开启开发者模式和 USB 调试后，可以执行：
 
 ```bash
@@ -53,7 +55,7 @@ adb install -r build/app/outputs/flutter-apk/app-release.apk
 
 当前未配置私有发布密钥时会使用 Android 调试密钥签署 release 构建，可直接用于实体机测试但不应作为应用商店正式签名。完整流程见 [Android 构建与实体机测试](docs/ANDROID_RELEASE.md)
 
-正式发布、版本清单和 GitHub Release 流程见 [发布与更新](docs/RELEASE_AND_UPDATE.md)，数据处理边界见 [隐私说明](docs/PRIVACY.md)
+日常操作见 [使用文档](docs/USER_GUIDE.md)，版本变化见 [版本记录](CHANGELOG.md)，正式发布、版本清单和 GitHub Release 流程见 [发布与更新](docs/RELEASE_AND_UPDATE.md)，数据处理边界见 [隐私说明](docs/PRIVACY.md)
 
 ## 使用顺序
 
@@ -65,7 +67,7 @@ adb install -r build/app/outputs/flutter-apk/app-release.apk
 
 Android 官方模拟器访问电脑本机游戏服务器时使用 `10.0.2.2`，实体设备应填写电脑的局域网地址。实体设备与电脑需要位于可互访的局域网，电脑防火墙也要允许对应 TCP 端口。LLM API Key 和房间密码保存在系统安全存储中
 
-连接页的“保存配置”会将非敏感字段写入应用偏好，并将每份配置的房间密码单独写入系统安全存储。同名保存会覆盖原配置，保存空密码会删除旧密码。“手机本机 YGOMobile”会套用 `127.0.0.1:7911`，用于连接同一台 Android 设备上监听本机端口的游戏房间
+连接页的“保存配置”会将非敏感字段写入应用偏好，并将每份配置的房间密码单独写入系统安全存储。同名保存会覆盖原配置，保存空密码会删除旧密码。“手机本机 YGOMobile”会套用 `172.19.0.1:7911` 并清除已有密码，立即进入等待界面，每 5 秒尝试连接一次，最多等待 5 分钟，适合先启动 Link 再切换到同一台 Android 设备上的 YGOMobile 创建房间
 
 Android 的 `INTERNET` 权限在安装时自动授予，不会显示运行时弹窗。Android 13 及以上首次成功连接时会申请通知权限，用于显示对局保活通知；拒绝通知不会改变协议内容，但部分系统会进一步限制后台运行
 

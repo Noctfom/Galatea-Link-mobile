@@ -16,6 +16,7 @@ class OnnxPolicyDecision {
     required this.confidence,
     required this.selectedProbability,
     required this.value,
+    required this.encodingElapsed,
     required this.elapsed,
   });
 
@@ -23,6 +24,7 @@ class OnnxPolicyDecision {
   final double confidence;
   final double selectedProbability;
   final double value;
+  final Duration encodingElapsed;
   final Duration elapsed;
 }
 
@@ -46,14 +48,16 @@ class OnnxDecisionPolicy {
     if (candidates.isEmpty) {
       throw const FormatException('本地模型没有可选择的合法动作');
     }
+    final encodingStopwatch = Stopwatch()..start();
     final batch = _encoder.encode(
       gameState,
       candidates,
       semanticStore: runtime.semanticStore,
       cardDatabase: cardDatabase,
     );
+    encodingStopwatch.stop();
     final inference = await runtime.run(batch.inputs);
-    final temperature = settings.coreTemperature.clamp(0.05, 5).toDouble();
+    final temperature = settings.coreTemperature.clamp(0.05, 2).toDouble();
     final logits = inference.actionLogits
         .take(batch.candidateCount)
         .map((value) => value / temperature)
@@ -68,6 +72,7 @@ class OnnxDecisionPolicy {
       confidence: probabilities[bestIndex],
       selectedProbability: probabilities[selectedIndex],
       value: inference.value,
+      encodingElapsed: encodingStopwatch.elapsed,
       elapsed: inference.elapsed,
     );
   }

@@ -35,6 +35,12 @@ build/app/outputs/flutter-apk/app-release.apk
 
 该通用包同时包含 Android 支持的多个 ABI，适合第一次实体机验证。需要减小体积时再执行 `flutter build apk --release --split-per-abi`
 
+正式发布时复制并重命名为：
+
+```text
+build/release/Galatea-Link-mobile-v0.2.2-universal.apk
+```
+
 ## 安装与升级
 
 连接已开启 USB 调试的设备后执行：
@@ -59,6 +65,14 @@ keyAlias=上传密钥别名
 storeFile=密钥文件绝对路径
 ```
 
+构建后应使用 Android SDK 中最新的 `apksigner` 验证签名，并记录公开证书指纹：
+
+```powershell
+& "$env:LOCALAPPDATA\Android\Sdk\build-tools\当前版本\apksigner.bat" verify --verbose --print-certs .\build\release\Galatea-Link-mobile-v0.2.2-universal.apk
+```
+
+0.2.2 正式签名证书 SHA-256 为 `aadcaf435d58231092c5ca0b597039f06a52dc546a6d673f18843dc45dcacf45`。以后每次正式构建都应与该值比较，发现变化时不要发布或覆盖安装
+
 ## 实体机首轮检查
 
 1. 启动图标、应用名和浅色深色主题显示正常
@@ -81,11 +95,11 @@ release 主清单必须包含 `android.permission.INTERNET`。这是安装时自
 4. 连接局域网 MDPro3 时填写电脑局域网 IP，不要使用 `127.0.0.1` 或模拟器专用的 `10.0.2.2`
 5. 确认手机与电脑网络允许互访，并放行电脑防火墙中的 MDPro3 TCP 端口
 
-同一台实体设备上的 YGOMobile 本地房间使用 `127.0.0.1:7911`，可直接点击连接页的“手机本机 YGOMobile”快捷入口。Android 应用之间共享系统 TCP 网络栈，但 YGOMobile 仍需保持本地服务正在监听
+同一台实体设备上的 YGOMobile 本地房间使用 `172.19.0.1:7911`，可直接点击连接页的“手机本机 YGOMobile”快捷入口。应用会先进入概览并每 5 秒重试一次，最长等待 5 分钟，因此可以随后切换到 YGOMobile 创建房间
 
 ## 后台运行与文件打开
 
-游戏 TCP 连接成功后，应用会启动前台服务并显示“游戏连接运行中”通知，主动断开或远端关闭后服务随即停止。Android 13 及以上会在首次连接时请求通知权限
+进入本机等待流程或普通服务器确认房间后，应用会启动前台服务并显示“游戏连接运行中”通知，主动断开或远端关闭后服务随即停止。普通服务器 TCP 已连接但十二秒内未确认房间时会返回连接页并显示错误。Android 13 及以上会在首次连接时请求通知权限
 
 应用声明了 YDK、GKG 和 CDB 的打开入口。文件管理器通过 `content://` 授予的单文件读取权会由原生层复制为短期缓存，再交给 Flutter 层的原有校验流程。无需申请整个存储空间权限
 

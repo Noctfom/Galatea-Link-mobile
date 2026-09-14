@@ -205,7 +205,9 @@ class SecureSettingsStore {
     return MobileDecisionSettings(
       mode: preferences.getString(_decisionModeKey) ?? 'core_only',
       corePolicyMode: preferences.getString(_corePolicyKey) ?? 'greedy',
-      coreTemperature: preferences.getDouble(_coreTemperatureKey) ?? 0.8,
+      coreTemperature: (preferences.getDouble(_coreTemperatureKey) ?? 0.8)
+          .clamp(0.05, 2)
+          .toDouble(),
       coreConfidenceThreshold: preferences.getDouble(_coreThresholdKey) ?? 0.65,
       llmEnabled: preferences.getBool(_llmEnabledKey) ?? false,
       llmBaseUrl:

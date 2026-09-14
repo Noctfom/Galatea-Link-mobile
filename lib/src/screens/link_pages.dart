@@ -42,7 +42,9 @@ class _DecisionPageState extends State<DecisionPage> {
     _threshold =
         (intervention['core_confidence_threshold'] as num?)?.toDouble() ?? 0.65;
     _temperature =
-        (intervention['core_temperature'] as num?)?.toDouble() ?? 0.8;
+        ((intervention['core_temperature'] as num?)?.toDouble() ?? 0.8)
+            .clamp(0.05, 2)
+            .toDouble();
     _autonomyEnabled = autonomy['enabled'] as bool? ?? false;
   }
 
@@ -116,8 +118,8 @@ class _DecisionPageState extends State<DecisionPage> {
                 Slider(
                   value: _temperature,
                   min: 0.05,
-                  max: 5,
-                  divisions: 99,
+                  max: 2,
+                  divisions: 39,
                   label: _temperature.toStringAsFixed(2),
                   onChanged: (value) => setState(() => _temperature = value),
                 ),

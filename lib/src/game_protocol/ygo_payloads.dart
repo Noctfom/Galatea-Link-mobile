@@ -5,6 +5,56 @@ import 'dart:typed_data';
 import '../game_chat.dart';
 import 'byte_cursor.dart';
 
+const Map<int, String> _deckRejectionNames = <int, String>{
+  0x1: 'lf_list',
+  0x2: 'ocg_only',
+  0x3: 'tcg_only',
+  0x4: 'unknown_card',
+  0x5: 'card_count',
+  0x6: 'main_count',
+  0x7: 'extra_count',
+  0x8: 'side_count',
+  0x9: 'not_available',
+};
+
+const Map<int, String> _deckRejectionReasons = <int, String>{
+  0x1: '卡片不符合当前房间禁限卡表',
+  0x2: '当前房间不允许 OCG 专属卡片',
+  0x3: '当前房间不允许 TCG 专属卡片',
+  0x4: '服务器卡库中不存在这张卡片',
+  0x5: '同名卡片投入数量超过限制',
+  0x6: '主卡组数量不合法',
+  0x7: '额外卡组数量或卡片类型不合法',
+  0x8: '副卡组数量不合法',
+  0x9: '当前房间不允许使用这张卡片',
+};
+
+const Set<int> _deckRejectionCardFlags = <int>{
+  0x1,
+  0x2,
+  0x3,
+  0x4,
+  0x5,
+  0x9,
+};
+
+class DeckRejectionDetails {
+  // 保存服务器卡组错误位域拆出的原因和关联卡片或数量
+  const DeckRejectionDetails({
+    required this.violationCode,
+    required this.violation,
+    required this.reason,
+    this.cardCode,
+    this.reportedCount,
+  });
+
+  final int violationCode;
+  final String violation;
+  final String reason;
+  final int? cardCode;
+  final int? reportedCount;
+}
+
 // 构建 CTOS_CHAT 使用的 UTF-16LE 空结尾文本载荷
 Uint8List buildChatPayload(String text) {
   return encodeClientGameChat(text);
@@ -92,6 +142,21 @@ Uint8List buildJoinGamePayload({
     );
   }
   return (errorType: bytes.first, code: null);
+}
+
+// 将服务器卡组错误代码拆为稳定原因和卡片或数量参数
+DeckRejectionDetails decodeDeckRejectionCode(int errorCode) {
+  final normalized = errorCode & 0xFFFFFFFF;
+  final violationCode = (normalized >> 28) & 0x0F;
+  final value = normalized & 0x0FFFFFFF;
+  final isCardError = _deckRejectionCardFlags.contains(violationCode);
+  return DeckRejectionDetails(
+    violationCode: violationCode,
+    violation: _deckRejectionNames[violationCode] ?? 'unknown',
+    reason: _deckRejectionReasons[violationCode] ?? '卡组不符合服务器规则',
+    cardCode: isCardError && value != 0 ? value : null,
+    reportedCount: isCardError ? null : value,
+  );
 }
 
 // 从加入房间载荷读取单打或双打模式

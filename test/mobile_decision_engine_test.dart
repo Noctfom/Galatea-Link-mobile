@@ -32,6 +32,44 @@ void main() {
     engine.close();
   });
 
+  // 验证仅 Core 模式即使保留 LLM 开关也绝不会发起网络请求
+  test('core only never requests llm', () async {
+    var requestCount = 0;
+    final llmClient = LlmDecisionClient(
+      client: MockClient((_) async {
+        requestCount += 1;
+        return http.Response('{}', 500);
+      }),
+    );
+    final engine = MobileDecisionEngine(llmClient: llmClient);
+    const settings = MobileDecisionSettings(
+      mode: 'core_only',
+      corePolicyMode: 'greedy',
+      coreTemperature: 0.8,
+      coreConfidenceThreshold: 0.65,
+      llmEnabled: true,
+      llmBaseUrl: 'https://example.test/v1',
+      llmModel: 'must-not-be-called',
+      llmTemperature: 0.1,
+      llmTimeout: 5,
+      llmGameChatEnabled: false,
+      autonomyEnabled: false,
+    );
+    const action = PendingAction(type: 13, player: 0, options: <int>[0, 1]);
+
+    final outcome = await engine.decide(
+      settings: settings,
+      apiKey: 'unused',
+      gameState: MobileGameState(),
+      action: action,
+    );
+
+    expect(requestCount, 0);
+    expect(outcome.source, 'core_fallback');
+    expect(outcome.response, isNotNull);
+    engine.close();
+  });
+
   // 验证编排器会把 LLM 临时介入建议交还给控制器
   test('forwards llm autonomous intervention update', () async {
     final llmClient = LlmDecisionClient(

@@ -22,12 +22,14 @@ void main() {
         'api_key': 'secret-key',
         'nested': <String, Object?>{'authorization': 'Bearer secret-key'},
         'model': 'test-model',
+        'prompt_tokens': 123,
       },
     );
     final exported = await store.exportJsonLines();
 
     expect(exported, contains('[REDACTED]'));
     expect(exported, contains('test-model'));
+    expect(exported, contains('"prompt_tokens":123'));
     expect(exported, isNot(contains('secret-key')));
   });
 

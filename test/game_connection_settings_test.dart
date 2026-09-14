@@ -27,4 +27,41 @@ void main() {
     expect(restored.port, 7911);
     expect(restored.password, isEmpty);
   });
+
+  test('local YGOMobile preset uses phone bridge and clears password', () {
+    const settings = GameConnectionSettings(
+      host: 's1.ygo233.com',
+      port: 233,
+      password: 'old-password',
+      playerName: 'Galatea_AI',
+      gameId: 42,
+      protocolVersion: 0x1361,
+      preferSecond: true,
+    );
+
+    final local = settings.asLocalYgoMobile();
+
+    expect(local.host, '172.19.0.1');
+    expect(local.port, 7911);
+    expect(local.gameId, 0);
+    expect(local.password, isEmpty);
+    expect(local.isLocalYgoMobile, isTrue);
+    expect(local.playerName, settings.playerName);
+    expect(local.protocolVersion, settings.protocolVersion);
+    expect(local.preferSecond, isTrue);
+  });
+
+  test('local YGOMobile endpoint recognition ignores surrounding spaces', () {
+    const settings = GameConnectionSettings(
+      host: ' 172.19.0.1 ',
+      port: 7911,
+      password: '',
+      playerName: 'Galatea_AI',
+      gameId: 0,
+      protocolVersion: 0x1361,
+      preferSecond: false,
+    );
+
+    expect(settings.isLocalYgoMobile, isTrue);
+  });
 }

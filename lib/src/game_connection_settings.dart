@@ -1,6 +1,10 @@
 // 移动端 MDPro3 连接设置模型，保存服务器登录和先后攻偏好
 
 class GameConnectionSettings {
+  static const String localYgoMobileHost = '172.19.0.1';
+  static const int localYgoMobilePort = 7911;
+  static const int localYgoMobileGameId = 0;
+
   const GameConnectionSettings({
     required this.host,
     required this.port,
@@ -18,6 +22,20 @@ class GameConnectionSettings {
   final int gameId;
   final int protocolVersion;
   final bool preferSecond;
+
+  // 返回当前端点是否指向手机本机 YGOMobile
+  bool get isLocalYgoMobile =>
+      host.trim() == localYgoMobileHost && port == localYgoMobilePort;
+
+  // 返回清空密码后的手机本机 YGOMobile 连接配置
+  GameConnectionSettings asLocalYgoMobile() {
+    return copyWith(
+      host: localYgoMobileHost,
+      port: localYgoMobilePort,
+      password: '',
+      gameId: localYgoMobileGameId,
+    );
+  }
 
   // 创建只替换指定连接字段的新配置
   GameConnectionSettings copyWith({
